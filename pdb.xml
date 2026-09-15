@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pdb url="postgres://app:app@127.0.0.1:5432/gamedb?sslmode=disable"
+     genOutput="./example"
+     schema="public"
+     poolMaxConns="100" poolMinConns="10"
+     poolMaxConnLifetime="3600" poolMaxConnIdleTime="1800"
+     poolHealthCheckPeriod="60"
+     statementTimeoutMs="5000" idleInTransactionSessionTimeoutMs="5000"
+     appName="lobby-svc">
+    <!--
+    CREATE TABLE IF NOT EXISTS users (
+        id            BIGINT NOT NULL,
+        name          TEXT NOT NULL,
+        last_login_at TIMESTAMPTZ NOT NULL,
+        created_at    TIMESTAMPTZ NOT NULL,
+        token         TEXT NOT NULL
+    );
+
+    ALTER TABLE users
+        ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY,
+        ADD CONSTRAINT pk_users PRIMARY KEY (id);
+
+    CREATE INDEX index_token ON users (token);
+
+    CREATE INDEX joint_index_id_token ON users (id,token);
+    -->
+    <bean name="user">
+        <variable name="id" type="int64"/>
+        <variable name="name" type="string"/>
+        <variable name="lastLoginAt" type="time.Time"/>
+        <variable name="createdAt" type="time.Time"/>
+        <variable name="token" type="string"/>
+    </bean>
+    <table name="users" bean="user">
+        <primaryKey name="pk_users" variable="id" autoIncrement="true"/>
+        <index name="index_token" variable="token" unique="false"/>
+        <index name="joint_index_id_token" variable="id,token" unique="false"/>
+    </table>
+</pdb>
+
