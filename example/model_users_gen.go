@@ -3,21 +3,39 @@ package model
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"time"
 )
 
-// ErrConflict 表示Update时的旧值比对未命中：这一行在Load之后已经被其他请求改动过。
-// 调用方应该重新Load最新数据、重跑业务逻辑后再Update一次，而不是把它当成普通错误直接抛给玩家。
-var ErrUserConflict = errors.New("users: optimistic lock conflict, row changed since load")
+// ErrUserNotFound 表示Update时这一行已经不存在了（正常情况下走
+// SELECT ... FOR UPDATE 锁过的行不会出现这个错误，只有极端情况——比如这行被
+// 别的、不走这套生成代码的操作删掉了——才会触发，属于兜底防御，不是常规业务路径。
+var ErrUserNotFound = errors.New("users: row not found at update time")
 
-// DBTX 兼容 *sql.DB 和 *sql.Tx，业务方按需传入其中之一
+// DBTX 兼容 *pgxpool.Pool 和 pgx.Tx，业务方按需传入其中之一。
+// 注意这里的方法名是pgx的风格（Exec/QueryRow，没有Context后缀——pgx要求ctx必须
+// 作为第一个参数显式传入，不像database/sql那样保留了不带ctx的旧版本方法）。
+//
+// 重要：Load系列函数都用 SELECT ... FOR UPDATE 锁行，这个锁只在"显式事务"内
+// 才会一直持有到你Commit/Rollback为止。如果直接把 *pgxpool.Pool 传给Load
+// （而不是先 pool.Begin(ctx) 拿到 pgx.Tx 再传进去），FOR UPDATE 锁在这条
+// SELECT语句执行完就立刻释放了，后面的Update完全不受它保护，等于白锁——
+// 想要锁生效，必须是：
+//
+//	tx, _ := pool.Begin(ctx)
+//	defer tx.Rollback(ctx) // Commit成功后Rollback是空操作，可以放心defer
+//	obj, _ := LoadUser(ctx, tx, id)
+//	obj.SetXxx(...)
+//	_ = obj.Update(ctx, tx)
+//	tx.Commit(ctx)
 type DBTX interface {
-	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
-	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+	Exec(ctx context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
 }
 
 type User struct {
@@ -28,10 +46,10 @@ type User struct {
 	Token       string
 
 	loaded          bool
-	origName        string    // Load时的快照，Update做乐观锁比对用，业务代码不要读写
-	origLastLoginAt time.Time // Load时的快照，Update做乐观锁比对用，业务代码不要读写
-	origCreatedAt   time.Time // Load时的快照，Update做乐观锁比对用，业务代码不要读写
-	origToken       string    // Load时的快照，Update做乐观锁比对用，业务代码不要读写
+	origName        string    // Load时/上次Update成功后的快照，业务代码不要直接读写，见ResetToLoaded
+	origLastLoginAt time.Time // Load时/上次Update成功后的快照，业务代码不要直接读写，见ResetToLoaded
+	origCreatedAt   time.Time // Load时/上次Update成功后的快照，业务代码不要直接读写，见ResetToLoaded
+	origToken       string    // Load时/上次Update成功后的快照，业务代码不要直接读写，见ResetToLoaded
 	dirty           map[string]bool
 }
 
@@ -65,9 +83,25 @@ func (o *User) SetToken(v string) {
 	o.dirty["token"] = true
 }
 
+// ResetToLoaded 把对象的字段还原回Load成功时（或者上一次Update成功时）的快照值，
+// 并清空dirty标记——也就是"撤销所有还没真正写进数据库的内存修改"。
+//
+// 用途：Update失败、或者事务因为别的原因回滚了之后，内存里这个对象可能已经被
+// SetXxx改得和数据库实际内容不一样了。如果以后引入本地缓存、把这个对象继续放
+// 回缓存供下次读取复用，绝不能让缓存里存着"改了一半、DB其实没写进去"的脏状态——
+// 出错时调用这个方法，就能把对象安全地恢复成"确定和DB一致"的版本，再决定是丢弃
+// 还是放回缓存都不会有问题。当前实现里没有本地缓存，这个方法先备着。
+func (o *User) ResetToLoaded() {
+	o.Name = o.origName
+	o.LastLoginAt = o.origLastLoginAt
+	o.CreatedAt = o.origCreatedAt
+	o.Token = o.origToken
+	o.dirty = make(map[string]bool)
+}
+
 const selectColumnsUser = "id, name, last_login_at, created_at, token"
 
-func scanRowUser(row *sql.Row) (*User, error) {
+func scanRowUser(row pgx.Row) (*User, error) {
 	o := NewUser()
 	if err := row.Scan(
 		&o.Id,
@@ -87,31 +121,36 @@ func scanRowUser(row *sql.Row) (*User, error) {
 	return o, nil
 }
 
-// LoadUser 按主键读取一行。
-// 不加锁（不用 SELECT ... FOR UPDATE）——乐观锁模式下读不需要占用行锁，
-// 读到写之间即使夹了耗时操作（比如调用AI接口），也不会占着DB连接。
+// LoadUser 按主键读取一行，并用 SELECT ... FOR UPDATE 锁住这一行——
+// 只有传进来的db是"事务内"（pgx.Tx）时，这个锁才会一直持有到事务结束，见上面
+// DBTX的说明。
 func LoadUser(ctx context.Context, db DBTX, id int64) (*User, error) {
-	const q = "SELECT " + selectColumnsUser + " FROM users WHERE id = $1"
-	row := db.QueryRowContext(ctx, q, id)
+	const q = "SELECT " + selectColumnsUser + " FROM users WHERE id = $1 FOR UPDATE"
+	row := db.QueryRow(ctx, q, id)
 	return scanRowUser(row)
 }
 
-// LoadUserByToken 按 (token) 索引读取一行
+// LoadUserByToken 按 (token) 索引读取一行，
+// 同样用 SELECT ... FOR UPDATE 锁住这一行（用法上的注意事项和LoadUser一致）。
 func LoadUserByToken(ctx context.Context, db DBTX, token string) (*User, error) {
-	const q = "SELECT " + selectColumnsUser + " FROM users WHERE token = $1"
-	row := db.QueryRowContext(ctx, q, token)
+	const q = "SELECT " + selectColumnsUser + " FROM users WHERE token = $1 FOR UPDATE"
+	row := db.QueryRow(ctx, q, token)
 	return scanRowUser(row)
 }
 
-// LoadUserByIdToken 按 (id, token) 索引读取一行
+// LoadUserByIdToken 按 (id, token) 索引读取一行，
+// 同样用 SELECT ... FOR UPDATE 锁住这一行（用法上的注意事项和LoadUser一致）。
 func LoadUserByIdToken(ctx context.Context, db DBTX, id int64, token string) (*User, error) {
-	const q = "SELECT " + selectColumnsUser + " FROM users WHERE id = $1 AND token = $2"
-	row := db.QueryRowContext(ctx, q, id, token)
+	const q = "SELECT " + selectColumnsUser + " FROM users WHERE id = $1 AND token = $2 FOR UPDATE"
+	row := db.QueryRow(ctx, q, id, token)
 	return scanRowUser(row)
 }
 
-// Update 用字段级乐观锁把变化的字段写回，一次操作合并成一条SQL。
-// 返回 ErrUserConflict 表示期间数据已被其他请求改动，调用方应重新Load后重试。
+// Update 把变化的字段写回，一次操作合并成一条SQL。前提是这个对象是在
+// LoadUser（或者其它LoadUserBy...）锁过的同一个事务里
+// 拿到的——正常情况下不会出现并发覆盖问题，因为整行从Load到这里一直被锁着，
+// 不需要像乐观锁那样比对旧值。返回 ErrUserNotFound 属于极端兜底情况，
+// 不是常规会走到的路径。
 func (o *User) Update(ctx context.Context, tx DBTX) error {
 	if !o.loaded {
 		return errors.New("users: Update前必须先通过Load加载")
@@ -121,7 +160,6 @@ func (o *User) Update(ctx context.Context, tx DBTX) error {
 	}
 
 	var sets []string
-	var wheres []string
 	var args []interface{}
 	n := 0
 	next := func() int { n++; return n }
@@ -129,45 +167,36 @@ func (o *User) Update(ctx context.Context, tx DBTX) error {
 	if o.dirty["name"] {
 		sets = append(sets, fmt.Sprintf("name = $%d", next()))
 		args = append(args, o.Name)
-		wheres = append(wheres, fmt.Sprintf("name = $%d", next()))
-		args = append(args, o.origName)
 	}
 
 	if o.dirty["last_login_at"] {
 		sets = append(sets, fmt.Sprintf("last_login_at = $%d", next()))
 		args = append(args, o.LastLoginAt)
-		wheres = append(wheres, fmt.Sprintf("last_login_at = $%d", next()))
-		args = append(args, o.origLastLoginAt)
 	}
 
 	if o.dirty["created_at"] {
 		sets = append(sets, fmt.Sprintf("created_at = $%d", next()))
 		args = append(args, o.CreatedAt)
-		wheres = append(wheres, fmt.Sprintf("created_at = $%d", next()))
-		args = append(args, o.origCreatedAt)
 	}
 
 	if o.dirty["token"] {
 		sets = append(sets, fmt.Sprintf("token = $%d", next()))
 		args = append(args, o.Token)
-		wheres = append(wheres, fmt.Sprintf("token = $%d", next()))
-		args = append(args, o.origToken)
 	}
 
 	args = append(args, o.Id)
-	q := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d AND %s",
-		strings.Join(sets, ", "), n+1, strings.Join(wheres, " AND "))
+	q := fmt.Sprintf("UPDATE users SET %s WHERE id = $%d",
+		strings.Join(sets, ", "), n+1)
 
-	result, err := tx.ExecContext(ctx, q, args...)
+	tag, err := tx.Exec(ctx, q, args...)
 	if err != nil {
 		return err
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return ErrUserConflict
+	// pgconn.CommandTag.RowsAffected() 不返回error——这点和database/sql的
+	// sql.Result.RowsAffected()（返回(int64, error)）不一样，pgx这边执行都成功了
+	// 才会走到这里，行数本身不会再失败。
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
 	}
 
 	o.origName = o.Name
@@ -186,7 +215,7 @@ func InsertUser(ctx context.Context, tx DBTX, name string, lastLoginAt time.Time
 	o.LastLoginAt = lastLoginAt
 	o.CreatedAt = createdAt
 	o.Token = token
-	row := tx.QueryRowContext(ctx, q, name, lastLoginAt, createdAt, token)
+	row := tx.QueryRow(ctx, q, name, lastLoginAt, createdAt, token)
 	if err := row.Scan(&o.Id); err != nil {
 		return nil, err
 	}

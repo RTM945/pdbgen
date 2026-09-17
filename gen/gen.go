@@ -123,7 +123,7 @@ func buildTableData(packageName string, bean *schema.Bean, table schema.Table) (
 			ExportedName: exportName(v.Name),
 			OrigName:     "orig" + exportName(v.Name),
 			GoType:       v.Type,
-			Column:       camelToSnake(v.Name),
+			Column:       schema.ColumnName(v.Name),
 			IsPK:         v.Name == table.PrimaryKey.Variable,
 		}
 		td.AllFields = append(td.AllFields, fd)
@@ -150,7 +150,7 @@ func buildTableData(packageName string, bean *schema.Bean, table schema.Table) (
 			}
 			params = append(params, indexParam{ExportedName: exportName(vn), GoType: v.Type})
 			funcSuffixParts = append(funcSuffixParts, exportName(vn))
-			columns = append(columns, camelToSnake(vn))
+			columns = append(columns, schema.ColumnName(vn))
 		}
 
 		whereParts := make([]string, len(columns))
@@ -204,22 +204,6 @@ func exportName(s string) string {
 	r := []rune(s)
 	r[0] = unicode.ToUpper(r[0])
 	return string(r)
-}
-
-// camelToSnake 把 lastLoginAt 变成 last_login_at（PG列名习惯）
-func camelToSnake(s string) string {
-	var b strings.Builder
-	for i, r := range s {
-		if unicode.IsUpper(r) {
-			if i > 0 {
-				b.WriteByte('_')
-			}
-			b.WriteRune(unicode.ToLower(r))
-		} else {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
 
 // ---- 模板 ----

@@ -7,13 +7,21 @@ package schemacheck
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
+
 	"pdbgen/schema"
 )
+
+// DB 是schemacheck需要的最小接口，*pgxpool.Pool 和 pgx.Tx 都天然满足——
+// 和 ddl.DB 是同一套思路，两个包可以共用同一个连接池，不需要各自单独连一次库。
+type DB interface {
+	QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row
+	Query(ctx context.Context, sql string, args ...interface{}) (pgx.Rows, error)
+}
 
 // DiffKind 差异类型
 type DiffKind string
@@ -66,7 +74,7 @@ type dbColumn struct {
 
 // Check 对pdb里的每一张table，查询db的实际结构并给出差异列表。
 // db需要已经指向目标数据库（哪个schema/哪个库由调用方在连接串里决定，这里固定查 public schema）。
-func Check(ctx context.Context, db *sql.DB, pdb *schema.PDB) ([]Diff, error) {
+func Check(ctx context.Context, db DB, pdb *schema.PDB) ([]Diff, error) {
 	pgSchema := pdb.Schema
 	if pgSchema == "" {
 		pgSchema = "public" // pdb.Schema 正常情况下已经在schema.Parse阶段被兜底成public，这里是双重保险
@@ -113,23 +121,23 @@ func Check(ctx context.Context, db *sql.DB, pdb *schema.PDB) ([]Diff, error) {
 	return diffs, nil
 }
 
-func tableExists(ctx context.Context, db *sql.DB, pgSchema, table string) (bool, error) {
+func tableExists(ctx context.Context, db DB, pgSchema, table string) (bool, error) {
 	const q = `SELECT EXISTS (
 		SELECT 1 FROM information_schema.tables
 		WHERE table_schema = $1 AND table_name = $2
 	)`
 	var exists bool
-	if err := db.QueryRowContext(ctx, q, pgSchema, table).Scan(&exists); err != nil {
+	if err := db.QueryRow(ctx, q, pgSchema, table).Scan(&exists); err != nil {
 		return false, fmt.Errorf("检查表 %q 是否存在: %w", table, err)
 	}
 	return exists, nil
 }
 
-func fetchColumns(ctx context.Context, db *sql.DB, pgSchema, table string) (map[string]dbColumn, error) {
+func fetchColumns(ctx context.Context, db DB, pgSchema, table string) (map[string]dbColumn, error) {
 	const q = `SELECT column_name, data_type, is_nullable, is_identity
 		FROM information_schema.columns
 		WHERE table_schema = $1 AND table_name = $2`
-	rows, err := db.QueryContext(ctx, q, pgSchema, table)
+	rows, err := db.Query(ctx, q, pgSchema, table)
 	if err != nil {
 		return nil, fmt.Errorf("读取表 %q 的列信息: %w", table, err)
 	}
@@ -149,7 +157,7 @@ func fetchColumns(ctx context.Context, db *sql.DB, pgSchema, table string) (map[
 	return cols, rows.Err()
 }
 
-func checkColumns(ctx context.Context, db *sql.DB, pgSchema string, bean *schema.Bean, table schema.Table) ([]Diff, error) {
+func checkColumns(ctx context.Context, db DB, pgSchema string, bean *schema.Bean, table schema.Table) ([]Diff, error) {
 	actual, err := fetchColumns(ctx, db, pgSchema, table.Name)
 	if err != nil {
 		return nil, err
@@ -159,7 +167,7 @@ func checkColumns(ctx context.Context, db *sql.DB, pgSchema string, bean *schema
 	expectedCols := make(map[string]bool)
 
 	for _, v := range bean.Variables {
-		col := camelToSnake(v.Name)
+		col := schema.ColumnName(v.Name)
 		expectedCols[col] = true
 
 		pgType, err := schema.PGType(v.Type)
@@ -231,19 +239,19 @@ func checkColumns(ctx context.Context, db *sql.DB, pgSchema string, bean *schema
 	return diffs, nil
 }
 
-func checkPrimaryKey(ctx context.Context, db *sql.DB, pgSchema string, table schema.Table) ([]Diff, error) {
+func checkPrimaryKey(ctx context.Context, db DB, pgSchema string, table schema.Table) ([]Diff, error) {
 	const q = `SELECT EXISTS (
 		SELECT 1 FROM information_schema.table_constraints
 		WHERE table_schema = $1 AND table_name = $2 AND constraint_type = 'PRIMARY KEY'
 	)`
 	var exists bool
-	if err := db.QueryRowContext(ctx, q, pgSchema, table.Name).Scan(&exists); err != nil {
+	if err := db.QueryRow(ctx, q, pgSchema, table.Name).Scan(&exists); err != nil {
 		return nil, fmt.Errorf("检查表 %q 主键: %w", table.Name, err)
 	}
 	if exists {
 		return nil, nil
 	}
-	col := camelToSnake(table.PrimaryKey.Variable)
+	col := schema.ColumnName(table.PrimaryKey.Variable)
 	return []Diff{{
 		Table:  table.Name,
 		Kind:   MissingPrimary,
@@ -254,9 +262,9 @@ func checkPrimaryKey(ctx context.Context, db *sql.DB, pgSchema string, table sch
 	}}, nil
 }
 
-func checkIndexes(ctx context.Context, db *sql.DB, pgSchema string, table schema.Table) ([]Diff, error) {
+func checkIndexes(ctx context.Context, db DB, pgSchema string, table schema.Table) ([]Diff, error) {
 	const q = `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = $2`
-	rows, err := db.QueryContext(ctx, q, pgSchema, table.Name)
+	rows, err := db.Query(ctx, q, pgSchema, table.Name)
 	if err != nil {
 		return nil, fmt.Errorf("读取表 %q 的索引: %w", table.Name, err)
 	}
@@ -282,7 +290,7 @@ func checkIndexes(ctx context.Context, db *sql.DB, pgSchema string, table schema
 		vars := idx.Variables()
 		cols := make([]string, len(vars))
 		for i, v := range vars {
-			cols[i] = camelToSnake(v)
+			cols[i] = schema.ColumnName(v)
 		}
 		colList := strings.Join(cols, ", ")
 		uniqueKw := ""
@@ -340,7 +348,7 @@ func checkIndexes(ctx context.Context, db *sql.DB, pgSchema string, table schema
 
 // fetchIndexColumns 按索引名读取实际的列组成，顺序按索引定义中的顺序返回——
 // 联合索引的顺序有意义，不能当成集合比较。
-func fetchIndexColumns(ctx context.Context, db *sql.DB, pgSchema, indexName string) ([]string, error) {
+func fetchIndexColumns(ctx context.Context, db DB, pgSchema, indexName string) ([]string, error) {
 	const q = `
 		SELECT a.attname
 		FROM pg_class t
@@ -351,7 +359,7 @@ func fetchIndexColumns(ctx context.Context, db *sql.DB, pgSchema, indexName stri
 		JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
 		WHERE n.nspname = $1 AND i.relname = $2
 		ORDER BY k.ord`
-	rows, err := db.QueryContext(ctx, q, pgSchema, indexName)
+	rows, err := db.Query(ctx, q, pgSchema, indexName)
 	if err != nil {
 		return nil, fmt.Errorf("读取索引 %q 的列组成: %w", indexName, err)
 	}
@@ -378,20 +386,4 @@ func equalStringSlice(a, b []string) bool {
 		}
 	}
 	return true
-}
-
-// camelToSnake 与 gen 包内的实现保持一致的转换规则
-func camelToSnake(s string) string {
-	var b strings.Builder
-	for i, r := range s {
-		if r >= 'A' && r <= 'Z' {
-			if i > 0 {
-				b.WriteByte('_')
-			}
-			b.WriteRune(r - 'A' + 'a')
-		} else {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }

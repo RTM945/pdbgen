@@ -8,12 +8,11 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"flag"
 	"fmt"
 	"os"
 
-	_ "github.com/lib/pq"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"pdbgen/schema"
 	"pdbgen/schemacheck"
@@ -46,14 +45,14 @@ func run(xmlPath, dsn string) error {
 		dsn = pdb.URL
 	}
 
-	db, err := sql.Open("postgres", dsn)
+	ctx := context.Background()
+	db, err := pgxpool.New(ctx, dsn)
 	if err != nil {
 		return fmt.Errorf("连接数据库: %w", err)
 	}
 	defer db.Close()
 
-	ctx := context.Background()
-	if err := db.PingContext(ctx); err != nil {
+	if err := db.Ping(ctx); err != nil {
 		return fmt.Errorf("ping数据库失败: %w", err)
 	}
 
