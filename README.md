@@ -278,17 +278,18 @@ type RedEnvelope struct {
 	redEnvelope *pbean.RedEnvelope // 这是数据库对象
 }
 
-// 是否引入
-// INSERT INTO user_red_envelope
-//     (uid, act_id, today_cnt, total)
-// VALUES
-//     ($1, $2, 0, 0)
-// ON CONFLICT (uid, act_id)
-// DO NOTHING
-// RETURNING id, uid, act_id, last_refresh_at, today_cnt, total;
+// 不再用select for update
+// 请求进来SELECT pg_try_advisory_xact_lock(hashtext(user), uid);
+// 拿不到锁会立即返回 false
+// GM用pg_advisory_xact_lock(hashtext(user), uid)
+// 拿不到锁会等待
+// 注册的情况下还没有uid, 尝试用 pg_try_advisory_xact_lock(hashtext(account), account_id)
 
+
+// select id, uid, act_id, last_refresh_at, today_cnt, total from user_red_envelope where uid=$1, act_id=$2
+// 如果没有记录
+// insert into user_red_envelope (uid, act_id, today_cnt, total) values ($1, $2, 0, 0) RETURNING id, uid, act_id, last_refresh_at, today_cnt, total;
 func Get(uid int64, actId int32) *RedEnvelope {
-	// 这里会select for update
 	redEnvelope := ptable.UserRedEnvelope.LoadByUidActId(uid, actId)
 	if redEnvelope == nil {
 		redEnvelope = pbean.NewRedEnvelope()
