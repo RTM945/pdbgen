@@ -293,7 +293,7 @@ tx.Commit(ctx)
 		<variable name="uid" type="int64"/> user id
 		<variable name="actId" type="int32"/> 活动id
 		<variable name="lastRefreshAt" type="int64"/> 上一次刷新的时间
-		<variable name="todayCNT" type="int32"/> 今天领了几次
+		<variable name="todayCount" type="int32"/> 今天领了几次
 		<variable name="total" type="int32"/> 总共领了几次
 	</bean>
 

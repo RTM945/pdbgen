@@ -36,5 +36,20 @@
         <index name="index_token" variable="token" unique="false"/>
         <index name="joint_index_id_token" variable="id,token" unique="false"/>
     </table>
+
+
+    <bean name="RedEnvelope">
+        <variable name="id" type="int64"/> 自增
+        <variable name="uid" type="int64"/> user id
+        <variable name="actId" type="int32"/> 活动id
+        <variable name="lastRefreshAt" type="time.Time"/> 上一次刷新的时间
+        <variable name="todayCount" type="int32"/> 今天领了几次
+        <variable name="total" type="int32"/> 总共领了几次
+    </bean>
+
+    <table name="user_red_envelope" bean="RedEnvelope">
+        <primaryKey name="pk_user_red_envelope_id" variable="id" autoIncrement="true"/>
+        <index name="joint_index_user_red_envelope_uid_act_id" variable="uid,actId" unique="true"/>
+    </table>
 </pdb>
 
