@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <pdb url="postgres://app:app@127.0.0.1:5432/gamedb?sslmode=disable"
-     genOutput="./example"
+     genOutput="./ptable"
      schema="public"
      poolMaxConns="100" poolMinConns="10"
      poolMaxConnLifetime="3600" poolMaxConnIdleTime="1800"
@@ -31,7 +31,7 @@
         <variable name="createdAt" type="time.Time"/>
         <variable name="token" type="string"/>
     </bean>
-    <table name="users" bean="user">
+    <table name="user" bean="user">
         <primaryKey name="pk_users" variable="id" autoIncrement="true" start="1000"/>
         <index name="index_token" variable="token" unique="false"/>
         <index name="joint_index_id_token" variable="id,token" unique="false"/>
