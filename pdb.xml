@@ -11,14 +11,14 @@
     CREATE TABLE IF NOT EXISTS users (
         id            BIGINT NOT NULL,
         name          TEXT NOT NULL,
-        last_login_at TIMESTAMPTZ NOT NULL,
-        created_at    TIMESTAMPTZ NOT NULL,
+        last_login_at BIGINT NOT NULL,
+        created_at    BIGINT NOT NULL,
         token         TEXT NOT NULL
     );
 
-    ALTER TABLE users
+    ALTER TABLE user
         ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (START WITH 1000),
-        ADD CONSTRAINT pk_users PRIMARY KEY (id);
+        ADD CONSTRAINT pk_user PRIMARY KEY (id);
 
     CREATE INDEX index_token ON users (token);
 
@@ -27,12 +27,12 @@
     <bean name="user">
         <variable name="id" type="int64"/>
         <variable name="name" type="string"/>
-        <variable name="lastLoginAt" type="time.Time"/>
-        <variable name="createdAt" type="time.Time"/>
+        <variable name="lastLoginAt" type="int64"/>
+        <variable name="createdAt" type="int64"/>
         <variable name="token" type="string"/>
     </bean>
     <table name="user" bean="user">
-        <primaryKey name="pk_users" variable="id" autoIncrement="true" start="1000"/>
+        <primaryKey name="pk_user" variable="id" autoIncrement="true" start="1000"/>
         <index name="index_token" variable="token" unique="false"/>
         <index name="joint_index_id_token" variable="id,token" unique="false"/>
     </table>
@@ -42,7 +42,7 @@
         <variable name="id" type="int64"/> 自增
         <variable name="uid" type="int64"/> user id
         <variable name="actId" type="int32"/> 活动id
-        <variable name="lastRefreshAt" type="time.Time"/> 上一次刷新的时间
+        <variable name="lastRefreshAt" type="int64"/> 上一次刷新的时间
         <variable name="todayCount" type="int32"/> 今天领了几次
         <variable name="total" type="int32"/> 总共领了几次
     </bean>

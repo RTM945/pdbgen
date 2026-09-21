@@ -18,6 +18,7 @@ func Get(ctx context.Context, uid int64, actId int32) *RedEnvelope {
 		redEnvelope.SetActId(actId)
 		redEnvelope.SetTodayCount(0)
 		redEnvelope.SetTotal(0)
+		redEnvelope.SetLastRefreshAt(0)
 		ptable.UserRedEnvelopeTable.Insert(ctx, redEnvelope)
 	}
 	ret := &RedEnvelope{redEnvelope}
@@ -29,6 +30,6 @@ func (e *RedEnvelope) refresh() {
 	//if !timeutil.IsSameDay(time.Now, e.LastRefreshAt(), 5) {
 	// 跨天刷新次数
 	e.SetTodayCount(0)
-	e.SetLastRefreshAt(time.Now())
+	e.SetLastRefreshAt(time.Now().Unix())
 	//}
 }

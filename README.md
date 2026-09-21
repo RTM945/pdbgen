@@ -1,20 +1,20 @@
 # pdbgen
 ```
+<?xml version="1.0" encoding="UTF-8"?>
 <pdb url="postgres://app:app@127.0.0.1:5432/gamedb?sslmode=disable"
-     genOutput="./example"
+     genOutput="./ptable"
      schema="public"
      poolMaxConns="100" poolMinConns="10"
      poolMaxConnLifetime="3600" poolMaxConnIdleTime="1800"
      poolHealthCheckPeriod="60"
      statementTimeoutMs="5000" idleInTransactionSessionTimeoutMs="5000"
      appName="lobby-svc">
-	 
-	<!--
-    CREATE TABLE IF NOT EXISTS user (
+    <!--
+    CREATE TABLE IF NOT EXISTS users (
         id            BIGINT NOT NULL,
         name          TEXT NOT NULL,
-        last_login_at TIMESTAMPTZ NOT NULL,
-        created_at    TIMESTAMPTZ NOT NULL,
+        last_login_at BIGINT NOT NULL,
+        created_at    BIGINT NOT NULL,
         token         TEXT NOT NULL
     );
 
@@ -22,38 +22,40 @@
         ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY (START WITH 1000),
         ADD CONSTRAINT pk_user PRIMARY KEY (id);
 
-    CREATE UNIQUE INDEX index_token ON user (token) ;
+    CREATE INDEX index_token ON users (token);
 
-    CREATE UNIQUE INDEX joint_index_id_token ON user (id,token);
+    CREATE INDEX joint_index_id_token ON users (id,token);
     -->
-    <bean name="User">
+    <bean name="user">
         <variable name="id" type="int64"/>
         <variable name="name" type="string"/>
-        <variable name="lastLoginAt" type="time.Time"/>
-        <variable name="createdAt" type="time.Time"/>
+        <variable name="lastLoginAt" type="int64"/>
+        <variable name="createdAt" type="int64"/>
         <variable name="token" type="string"/>
     </bean>
-    <table name="user" bean="User">
-        <primaryKey name="pk_user_id" variable="id" autoIncrement="true" start="1000"/>
-        <index name="index_token" variable="token" unique="true"/>
-        <index name="joint_index_id_token" variable="id,token" unique="true"/>
+    <table name="user" bean="user">
+        <primaryKey name="pk_user" variable="id" autoIncrement="true" start="1000"/>
+        <index name="index_token" variable="token" unique="false"/>
+        <index name="joint_index_id_token" variable="id,token" unique="false"/>
     </table>
-	
-	
-	<bean name="RedEnvelope">
-		<variable name="id" type="int64"/> 自增
-		<variable name="uid" type="int64"/> user id
-		<variable name="actId" type="int32"/> 活动id
-		<variable name="lastRefreshAt" type="int64"/> 上一次刷新的时间
-		<variable name="todayCount" type="int32"/> 今天领了几次
-		<variable name="total" type="int32"/> 总共领了几次
-	</bean>
 
-	<table name="user_red_envelope" bean="RedEnvelope">
-		<primaryKey name="pk_red_envelope_id" variable="id" autoIncrement="true"/>
-		<index name="joint_index_uid_act_id" variable="uid,actId" unique="true"/>
-	</table>
+
+    <bean name="RedEnvelope">
+        <variable name="id" type="int64"/> 自增
+        <variable name="uid" type="int64"/> user id
+        <variable name="actId" type="int32"/> 活动id
+        <variable name="lastRefreshAt" type="int64"/> 上一次刷新的时间
+        <variable name="todayCount" type="int32"/> 今天领了几次
+        <variable name="total" type="int32"/> 总共领了几次
+    </bean>
+
+    <table name="user_red_envelope" bean="RedEnvelope">
+        <primaryKey name="pk_user_red_envelope_id" variable="id" autoIncrement="true"/>
+        <index name="joint_index_user_red_envelope_uid_act_id" variable="uid,actId" unique="true"/>
+    </table>
 </pdb>
+
+
 // 在process之上应该有开事务，没有error和panic的情况下会自动update和提交
 func ProcessRedEnvelope(session *Session, req *CRedEnvelope) {
 	redenvelope.Get(session.UID, req.ActID).Online(session)

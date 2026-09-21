@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -20,14 +19,14 @@ type RedEnvelope struct {
 	id            int64
 	uid           int64
 	actId         int32
-	lastRefreshAt time.Time
+	lastRefreshAt int64
 	todayCount    int32
 	total         int32
 
 	loaded            bool
 	origUid           int64
 	origActId         int32
-	origLastRefreshAt time.Time
+	origLastRefreshAt int64
 	origTodayCount    int32
 	origTotal         int32
 
@@ -44,7 +43,7 @@ func loadedRedEnvelope(
 	id int64,
 	uid int64,
 	actId int32,
-	lastRefreshAt time.Time,
+	lastRefreshAt int64,
 	todayCount int32,
 	total int32,
 ) *RedEnvelope {
@@ -93,7 +92,7 @@ func (o *RedEnvelope) ActId() int32 {
 	return o.actId
 }
 
-func (o *RedEnvelope) SetLastRefreshAt(v time.Time) {
+func (o *RedEnvelope) SetLastRefreshAt(v int64) {
 	if o.lastRefreshAt == v {
 		return
 	}
@@ -102,7 +101,7 @@ func (o *RedEnvelope) SetLastRefreshAt(v time.Time) {
 	o.dirty["last_refresh_at"] = struct{}{}
 }
 
-func (o *RedEnvelope) LastRefreshAt() time.Time {
+func (o *RedEnvelope) LastRefreshAt() int64 {
 	return o.lastRefreshAt
 }
 
@@ -155,7 +154,7 @@ func scanRedEnvelope(row pgx.Row) *RedEnvelope {
 		id            int64
 		uid           int64
 		actId         int32
-		lastRefreshAt time.Time
+		lastRefreshAt int64
 		todayCount    int32
 		total         int32
 	)

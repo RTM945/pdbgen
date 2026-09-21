@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -19,14 +18,14 @@ type user struct{}
 type User struct {
 	id          int64
 	name        string
-	lastLoginAt time.Time
-	createdAt   time.Time
+	lastLoginAt int64
+	createdAt   int64
 	token       string
 
 	loaded          bool
 	origName        string
-	origLastLoginAt time.Time
-	origCreatedAt   time.Time
+	origLastLoginAt int64
+	origCreatedAt   int64
 	origToken       string
 
 	dirty map[string]struct{}
@@ -41,8 +40,8 @@ func NewUser() *User {
 func loadedUser(
 	id int64,
 	name string,
-	lastLoginAt time.Time,
-	createdAt time.Time,
+	lastLoginAt int64,
+	createdAt int64,
 	token string,
 ) *User {
 	return &User{
@@ -75,7 +74,7 @@ func (o *User) Name() string {
 	return o.name
 }
 
-func (o *User) SetLastLoginAt(v time.Time) {
+func (o *User) SetLastLoginAt(v int64) {
 	if o.lastLoginAt == v {
 		return
 	}
@@ -84,11 +83,11 @@ func (o *User) SetLastLoginAt(v time.Time) {
 	o.dirty["last_login_at"] = struct{}{}
 }
 
-func (o *User) LastLoginAt() time.Time {
+func (o *User) LastLoginAt() int64 {
 	return o.lastLoginAt
 }
 
-func (o *User) SetCreatedAt(v time.Time) {
+func (o *User) SetCreatedAt(v int64) {
 	if o.createdAt == v {
 		return
 	}
@@ -97,7 +96,7 @@ func (o *User) SetCreatedAt(v time.Time) {
 	o.dirty["created_at"] = struct{}{}
 }
 
-func (o *User) CreatedAt() time.Time {
+func (o *User) CreatedAt() int64 {
 	return o.createdAt
 }
 
@@ -135,8 +134,8 @@ func scanUser(row pgx.Row) *User {
 	var (
 		id          int64
 		name        string
-		lastLoginAt time.Time
-		createdAt   time.Time
+		lastLoginAt int64
+		createdAt   int64
 		token       string
 	)
 
