@@ -68,41 +68,50 @@ func ProcessRedEnvelopeReceive(session *Session, req *CRedEnvelopeReceive) {
 // 业务程序员只应该关心如下的代码，有error和panic会自动回滚
 type RedEnvelope struct {
   *ptable.RedEnvelope // 这是数据库对象
+  readonly bool
 }
 
 // 不再用select for update
-// 请求进来SELECT pg_try_advisory_xact_lock(hashtext(user), uid);
+// 玩家请求进来SELECT pg_try_advisory_xact_lock(hashtext(user), uid);
 // 拿不到锁会立即返回 false
-// GM用pg_advisory_xact_lock(hashtext(user), uid)
+// GM和RPC的写请求用pg_advisory_xact_lock(hashtext(user), uid)
 // 拿不到锁会等待
 // 注册的情况下还没有uid, 尝试用 pg_try_advisory_xact_lock(hashtext(account), account_id)
 
+// GM和RPC的只读请求需要明确标注readonly
+// 我怀念java可以用注解在上层方法体上区分要不要用事务，是try_lock还是直接lock，再用反射aop加获取事务或者conn的代码
 
 // select id, uid, act_id, last_refresh_at, today_count, total from user_red_envelope where uid=$1, act_id=$2
 // 如果没有记录
 // insert into user_red_envelope (uid, act_id, today_cnt, total) values ($1, $2, 0, 0) RETURNING id, uid, act_id, last_refresh_at, today_cnt, total;
 
-func Get(uid int64, actId int32) *RedEnvelope {
-	// 这里会select for update
-	redEnvelope := ptable.UserRedEnvelope.LoadByUidActId(uid, actId)
+func Get(ctx context.Context, uid int64, actId int32, readonly bool) *RedEnvelope {
+	var redEnvelope *ptable.RedEnvelope
+	if readonly {
+		redEnvelope = ptable.UserRedEnvelopeTable.SelectByUidActId(ctx, uid, actId)
+	} else {
+		redEnvelope = ptable.UserRedEnvelopeTable.GetByUidActId(ctx, uid, actId)
+	}
 	if redEnvelope == nil {
-		redEnvelope = pbean.NewRedEnvelope()
+		redEnvelope = ptable.NewRedEnvelope()
 		redEnvelope.SetUid(uid)
 		redEnvelope.SetActId(actId)
 		redEnvelope.SetTodayCount(0)
 		redEnvelope.SetTotal(0)
-		ptable.UserRedEnvelope.Insert(redEnvelope)
+		redEnvelope.SetLastRefreshAt(0)
+		if !readonly {
+			ptable.UserRedEnvelopeTable.Insert(ctx, redEnvelope)
+		}
 	}
-	ret := &RedEnvelope{
-	    uid: uid,
-	    actId: actId,
-		redEnvelope: redEnvelope,
-	}
+	ret := &RedEnvelope{redEnvelope, readonly}
 	ret.refresh()
 	return ret
 }
 
 func (this *RedEnvelope) refresh() {
+    if e.readonly {
+		return
+	}
 	if !timeutil.IsSameDay(time.Now, this.RedEnvelope.GetLastRefreshAt(), 5) {
 		// 跨天刷新次数
 		this.redEnvelope.SetTodayCount(0)
@@ -142,3 +151,7 @@ func (this *RedEnvelope) Receive(session *Session) {
 	online(session)
 }
 ```
+
+# todo 
+目前只能读写一行，需要多行的代码生成和业务逻辑支持 
+对于ResetToLoaded，因为在一次请求中可能涉及到多个表的改变，可能需要在ctx中记log，要回滚时log中的对象按顺序全部回滚

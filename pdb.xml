@@ -6,6 +6,7 @@
      poolMaxConnLifetime="3600" poolMaxConnIdleTime="1800"
      poolHealthCheckPeriod="60"
      statementTimeoutMs="5000" idleInTransactionSessionTimeoutMs="5000"
+     lockTimeoutMs="1000"
      appName="lobby-svc">
     <!--
     CREATE TABLE IF NOT EXISTS users (
@@ -32,11 +33,8 @@
         <variable name="token" type="string"/>
     </bean>
     <table name="user" bean="user">
-        <primaryKey name="pk_user" variable="id" autoIncrement="true" start="1000"/>
-        <index name="index_token" variable="token" unique="false"/>
-        <index name="joint_index_id_token" variable="id,token" unique="false"/>
+        <primaryKey variable="id" autoIncrement="true" start="1000"/>
     </table>
-
 
     <bean name="RedEnvelope">
         <variable name="id" type="int64"/> 自增
@@ -48,8 +46,38 @@
     </bean>
 
     <table name="user_red_envelope" bean="RedEnvelope">
-        <primaryKey name="pk_user_red_envelope_id" variable="id" autoIncrement="true"/>
-        <index name="joint_index_user_red_envelope_uid_act_id" variable="uid,actId" unique="true"/>
+        <primaryKey variable="id" autoIncrement="true"/>
+        <index variable="uid,actId" unique="true"/>
+    </table>
+
+    <bean name="Mail">
+        <variable name="id" type="int64"/> 自增
+        <variable name="uid" type="int64"/> user id
+        <variable name="confId" type="int32"/> 配置id
+        <variable name="state" type="int32"/> 状态
+        <variable name="receiveAt" type="int64"/> 收取时间
+        <variable name="params" type="string"/> json
+        <variable name="awardList" type="string"/> json
+    </bean>
+
+    <table name="user_mail" bean="Mail">
+        <primaryKey variable="id" autoIncrement="true"/>
+        <index variable="uid,confId" unique="false"/>
+    </table>
+
+    <bean name="GMMail">
+        <variable name="id" type="int64"/> 自增
+        <variable name="params" type="string"/> json
+        <variable name="awardList" type="string"/> json
+        <variable name="startAt" type="int64"/> 开始时间
+        <variable name="endAt" type="int64"/> 结束时间
+        <variable name="channel" type="string"/> 渠道
+        <variable name="userCreatedAt" type="int64"/> 创角时间
+        <variable name="condition" type="string"/> 条件 应该需要脚本引擎执行
+    </bean>
+
+    <table name="user_gm_mail" bean="GMMail">
+        <primaryKey variable="id" autoIncrement="true"/>
     </table>
 </pdb>
 

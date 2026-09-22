@@ -23,6 +23,7 @@ type Schema struct {
 
 	StatementTimeoutMs                int `xml:"statementTimeoutMs,attr"`
 	IdleInTransactionSessionTimeoutMs int `xml:"idleInTransactionSessionTimeoutMs,attr"`
+	LockTimeoutMs                     int `xml:"lockTimeoutMs,attr"`
 
 	AppName string `xml:"appName,attr"`
 
@@ -48,14 +49,12 @@ type Table struct {
 }
 
 type PrimaryKey struct {
-	Name          string `xml:"name,attr"`
 	Variable      string `xml:"variable,attr"`
 	AutoIncrement bool   `xml:"autoIncrement,attr"`
 	Start         int64  `xml:"start,attr"`
 }
 
 type Index struct {
-	Name     string `xml:"name,attr"`
 	Variable string `xml:"variable,attr"`
 	Unique   bool   `xml:"unique,attr"`
 }
@@ -70,26 +69,30 @@ type Field struct {
 }
 
 type QueryMethod struct {
-	MethodName string
-	Params     string
-	Args       string
-	Where      string
+	Name   string
+	Params string
+	Args   string
+	Where  string
+	IsList bool
 }
 
 type TableGen struct {
-	TypeName       string
-	ReceiverName   string
-	TableName      string
-	TableAccessor  string
-	Fields         []Field
-	UpdateFields   []Field
-	InsertFields   []Field
-	PK             Field
-	AutoIncrement  bool
-	SelectColumns  string
-	ErrorName      string
-	QueryMethods   []QueryMethod
-	NeedTimeImport bool
+	TypeName      string
+	ReceiverName  string
+	TableAccessor string
+	TableName     string
+
+	Fields       []Field
+	UpdateFields []Field
+	InsertFields []Field
+
+	PK            Field
+	AutoIncrement bool
+
+	SelectColumns string
+	ErrorName     string
+
+	QueryMethods []QueryMethod
 }
 
 type TableFileGen struct {

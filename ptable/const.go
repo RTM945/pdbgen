@@ -9,6 +9,7 @@ import (
 )
 
 type txKey struct{}
+type querierKey struct{}
 
 type DBTX interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -16,6 +17,28 @@ type DBTX interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+type Querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
 func txFromCtx(ctx context.Context) DBTX {
 	return ctx.Value(txKey{}).(DBTX)
+}
+
+func txFromCtxOptional(ctx context.Context) (DBTX, bool) {
+	res := ctx.Value(txKey{})
+	if res == nil {
+		return nil, false
+	}
+	return res.(DBTX), true
+}
+
+func querierFromCtx(ctx context.Context) Querier {
+	if _, ok := txFromCtxOptional(ctx); ok {
+		// 这里直接 panic
+		// SelectByXXX 就是明确要求事务外只读
+		panic("SelectByXXX cannot be called inside transaction")
+	}
+	return ctx.Value(querierKey{}).(Querier)
 }

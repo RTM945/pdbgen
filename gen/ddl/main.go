@@ -53,11 +53,12 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	conn, err := pgx.Connect(ctx, schema.URL)
-	if err != nil {
-		panic(err)
-	}
-	defer conn.Close(ctx)
+	//conn, err := pgx.Connect(ctx, schema.URL)
+	//if err != nil {
+	//	panic(err)
+	//}
+	//defer conn.Close(ctx)
+	var conn *pgx.Conn
 
 	if err := generate(ctx, schema, conn); err != nil {
 		panic(err)
@@ -65,10 +66,11 @@ func main() {
 }
 
 func generate(ctx context.Context, schema *readxml.Schema, conn *pgx.Conn) error {
-	dbTables, err := inspectDatabase(ctx, conn, schema.Schema)
-	if err != nil {
-		return err
-	}
+	//dbTables, err := inspectDatabase(ctx, conn, schema.Schema)
+	//if err != nil {
+	//	return err
+	//}
+	dbTables := make(map[string]*DBTable)
 
 	var b strings.Builder
 
@@ -404,7 +406,11 @@ func generateMissingTableDDL(b *strings.Builder, schema *readxml.Schema, table r
 	return nil
 }
 
-func generatePrimaryKeyDDL(b *strings.Builder, schema *readxml.Schema, table readxml.Table) {
+func generatePrimaryKeyDDL(
+	b *strings.Builder,
+	schema *readxml.Schema,
+	table readxml.Table,
+) {
 	pk := table.PrimaryKey
 
 	var actions []string
@@ -426,7 +432,7 @@ func generatePrimaryKeyDDL(b *strings.Builder, schema *readxml.Schema, table rea
 		actions,
 		fmt.Sprintf(
 			"ADD CONSTRAINT %s PRIMARY KEY (%s)",
-			quoteIdent(pk.Name),
+			quoteIdent(primaryKeyName(table)),
 			quoteIdent(readxml.SnakeCase(pk.Variable)),
 		),
 	)
@@ -440,15 +446,16 @@ func generatePrimaryKeyDDL(b *strings.Builder, schema *readxml.Schema, table rea
 	)
 }
 
-func generateIndexDDL(b *strings.Builder, schema *readxml.Schema, table readxml.Table, index readxml.Index) error {
+func generateIndexDDL(
+	b *strings.Builder,
+	schema *readxml.Schema,
+	table readxml.Table,
+	index readxml.Index,
+) error {
 	columns := readxml.SplitTrimSpace(index.Variable)
 
 	if len(columns) == 0 {
-		return fmt.Errorf(
-			"table %s index %s has no columns",
-			table.Name,
-			index.Name,
-		)
+		return fmt.Errorf("table %s has empty index", table.Name)
 	}
 
 	b.WriteString("CREATE ")
@@ -458,7 +465,7 @@ func generateIndexDDL(b *strings.Builder, schema *readxml.Schema, table readxml.
 	}
 
 	b.WriteString("INDEX IF NOT EXISTS ")
-	b.WriteString(quoteIdent(index.Name))
+	b.WriteString(quoteIdent(indexName(table, index)))
 
 	b.WriteString(" ON ")
 	b.WriteString(quoteIdent(schema.Schema))
@@ -471,12 +478,32 @@ func generateIndexDDL(b *strings.Builder, schema *readxml.Schema, table readxml.
 			b.WriteString(", ")
 		}
 
-		b.WriteString(quoteIdent(readxml.SnakeCase(column)))
+		b.WriteString(
+			quoteIdent(readxml.SnakeCase(column)),
+		)
 	}
 
 	b.WriteString(");\n")
 
 	return nil
+}
+
+func indexName(table readxml.Table, index readxml.Index) string {
+	var columns []string
+
+	for _, column := range readxml.SplitTrimSpace(index.Variable) {
+		columns = append(columns, readxml.SnakeCase(column))
+	}
+
+	return fmt.Sprintf("idx_%s_%s", table.Name, strings.Join(columns, "_"))
+}
+
+func primaryKeyName(table readxml.Table) string {
+	return fmt.Sprintf(
+		"pk_%s_%s",
+		table.Name,
+		readxml.SnakeCase(table.PrimaryKey.Variable),
+	)
 }
 
 func generateAlterDDL(b *strings.Builder, schema *readxml.Schema, table readxml.Table, dbTable *DBTable) error {
@@ -547,9 +574,8 @@ func generateAlterDDL(b *strings.Builder, schema *readxml.Schema, table readxml.
 		if dbTable.PrimaryKey == nil {
 			generatePrimaryKeyDDL(b, schema, table)
 		} else {
-			if dbTable.PrimaryKey.Name !=
-				table.PrimaryKey.Name {
-				return fmt.Errorf("table %s primary key name mismatch: db=%s xml=%s", table.Name, dbTable.PrimaryKey.Name, table.PrimaryKey.Name)
+			if dbTable.PrimaryKey.Name != primaryKeyName(table) {
+				return fmt.Errorf("table %s primary key name mismatch: db=%s xml=%s", table.Name, dbTable.PrimaryKey.Name, primaryKeyName(table))
 			}
 
 			expected := []string{readxml.SnakeCase(table.PrimaryKey.Variable)}
@@ -587,7 +613,7 @@ func generateAlterDDL(b *strings.Builder, schema *readxml.Schema, table readxml.
 	// ------------------------------------------------------------
 
 	for _, index := range table.Indexes {
-		existing, exists := dbTable.Indexes[index.Name]
+		existing, exists := dbTable.Indexes[indexName(table, index)]
 
 		if !exists {
 			if err := generateIndexDDL(b, schema, table, index); err != nil {
@@ -605,7 +631,7 @@ func generateAlterDDL(b *strings.Builder, schema *readxml.Schema, table readxml.
 		}
 
 		if existing.Unique != index.Unique || !sameStrings(existing.Columns, expectedColumns) {
-			return fmt.Errorf("table %s index %s definition mismatch", table.Name, index.Name)
+			return fmt.Errorf("table %s index %s definition mismatch", table.Name, indexName(table, index))
 		}
 	}
 

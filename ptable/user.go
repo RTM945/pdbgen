@@ -45,20 +45,22 @@ func loadedUser(
 	token string,
 ) *User {
 	return &User{
-		id:          id,
-		name:        name,
-		lastLoginAt: lastLoginAt,
-		createdAt:   createdAt,
-		token:       token,
-
+		id:              id,
+		name:            name,
+		lastLoginAt:     lastLoginAt,
+		createdAt:       createdAt,
+		token:           token,
 		loaded:          true,
 		origName:        name,
 		origLastLoginAt: lastLoginAt,
 		origCreatedAt:   createdAt,
 		origToken:       token,
-
-		dirty: make(map[string]struct{}),
+		dirty:           make(map[string]struct{}),
 	}
+}
+
+func (o *User) Id() int64 {
+	return o.id
 }
 
 func (o *User) SetName(v string) {
@@ -113,12 +115,6 @@ func (o *User) Token() string {
 	return o.token
 }
 
-func (o *User) Id() int64 {
-	return o.id
-}
-
-// ResetToLoaded restores every non-primary-key field to the last
-// successfully loaded/inserted/updated snapshot.
 func (o *User) ResetToLoaded() {
 	o.name = o.origName
 	o.lastLoginAt = o.origLastLoginAt
@@ -130,7 +126,9 @@ func (o *User) ResetToLoaded() {
 
 const selectColumnsUser = "id, name, last_login_at, created_at, token"
 
-func scanUser(row pgx.Row) *User {
+func scanUserRow(
+	row pgx.Row,
+) *User {
 	var (
 		id          int64
 		name        string
@@ -162,38 +160,143 @@ func scanUser(row pgx.Row) *User {
 	)
 }
 
-func (user) GetById(
+func scanUserRows(
+	rows pgx.Rows,
+) *User {
+	var (
+		id          int64
+		name        string
+		lastLoginAt int64
+		createdAt   int64
+		token       string
+	)
+
+	if err := rows.Scan(
+		&id,
+		&name,
+		&lastLoginAt,
+		&createdAt,
+		&token,
+	); err != nil {
+		panic(err)
+	}
+
+	return loadedUser(
+		id,
+		name,
+		lastLoginAt,
+		createdAt,
+		token,
+	)
+}
+
+func (o user) getId(
 	ctx context.Context,
+	q Querier,
 	id int64,
 ) *User {
-	tx := txFromCtx(ctx)
-
-	const q = "SELECT " + selectColumnsUser +
+	const query = "SELECT " + selectColumnsUser +
 		" FROM user" +
 		" WHERE id = $1"
 
-	row := tx.QueryRow(
+	row := q.QueryRow(
 		ctx,
-		q,
+		query,
 		id,
 	)
 
-	return scanUser(row)
+	return scanUserRow(row)
 }
 
-func (user) Update(
+func (o user) GetById(
 	ctx context.Context,
-	o *User,
+	id int64,
+) *User {
+	return o.getId(
+		ctx,
+		txFromCtx(ctx),
+		id,
+	)
+}
+
+func (o user) SelectById(
+	ctx context.Context,
+	id int64,
+) *User {
+	return o.getId(
+		ctx,
+		querierFromCtx(ctx),
+		id,
+	)
+}
+
+func (o user) getAll(
+	ctx context.Context,
+	q Querier,
+) []*User {
+	const query = "SELECT " + selectColumnsUser +
+		" FROM user"
+
+	rows, err := q.Query(
+		ctx,
+		query,
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer rows.Close()
+
+	var result []*User
+
+	for rows.Next() {
+		result = append(
+			result,
+			scanUserRows(rows),
+		)
+	}
+
+	if err := rows.Err(); err != nil {
+		panic(err)
+	}
+
+	return result
+}
+
+func (o user) GetAll(
+	ctx context.Context,
+) []*User {
+	return o.getAll(
+		ctx,
+		txFromCtx(ctx),
+	)
+}
+
+func (o user) SelectAll(
+	ctx context.Context,
+) []*User {
+	return o.getAll(
+		ctx,
+		querierFromCtx(ctx),
+	)
+}
+
+var ErrUserNotFound = errors.New(
+	"user: row not found at update time",
+)
+
+func (o user) Update(
+	ctx context.Context,
+	v *User,
 ) error {
 	tx := txFromCtx(ctx)
 
-	if !o.loaded {
+	if !v.loaded {
 		return errors.New(
 			"update User must load first",
 		)
 	}
 
-	if len(o.dirty) == 0 {
+	if len(v.dirty) == 0 {
 		return nil
 	}
 
@@ -207,7 +310,7 @@ func (user) Update(
 		return n
 	}
 
-	if _, ok := o.dirty["name"]; ok {
+	if _, ok := v.dirty["name"]; ok {
 		sets = append(
 			sets,
 			fmt.Sprintf(
@@ -218,11 +321,11 @@ func (user) Update(
 
 		args = append(
 			args,
-			o.name,
+			v.name,
 		)
 	}
 
-	if _, ok := o.dirty["last_login_at"]; ok {
+	if _, ok := v.dirty["last_login_at"]; ok {
 		sets = append(
 			sets,
 			fmt.Sprintf(
@@ -233,11 +336,11 @@ func (user) Update(
 
 		args = append(
 			args,
-			o.lastLoginAt,
+			v.lastLoginAt,
 		)
 	}
 
-	if _, ok := o.dirty["created_at"]; ok {
+	if _, ok := v.dirty["created_at"]; ok {
 		sets = append(
 			sets,
 			fmt.Sprintf(
@@ -248,11 +351,11 @@ func (user) Update(
 
 		args = append(
 			args,
-			o.createdAt,
+			v.createdAt,
 		)
 	}
 
-	if _, ok := o.dirty["token"]; ok {
+	if _, ok := v.dirty["token"]; ok {
 		sets = append(
 			sets,
 			fmt.Sprintf(
@@ -263,19 +366,26 @@ func (user) Update(
 
 		args = append(
 			args,
-			o.token,
+			v.token,
 		)
 	}
 
-	args = append(args, o.id)
+	args = append(
+		args,
+		v.id,
+	)
 
-	q := fmt.Sprintf(
+	query := fmt.Sprintf(
 		"UPDATE user SET %s WHERE id = $%d",
 		strings.Join(sets, ", "),
 		n+1,
 	)
 
-	tag, err := tx.Exec(ctx, q, args...)
+	tag, err := tx.Exec(
+		ctx,
+		query,
+		args...,
+	)
 	if err != nil {
 		panic(err)
 	}
@@ -284,56 +394,54 @@ func (user) Update(
 		return ErrUserNotFound
 	}
 
-	o.origName = o.name
+	v.origName = v.name
 
-	o.origLastLoginAt = o.lastLoginAt
+	v.origLastLoginAt = v.lastLoginAt
 
-	o.origCreatedAt = o.createdAt
+	v.origCreatedAt = v.createdAt
 
-	o.origToken = o.token
+	v.origToken = v.token
 
-	o.dirty = make(map[string]struct{})
+	v.dirty = make(map[string]struct{})
 
 	return nil
 }
 
-var ErrUserNotFound = errors.New(
-	"user: row not found at update time",
-)
-
-func (user) Insert(
+func (o user) Insert(
 	ctx context.Context,
-	o *User,
+	v *User,
 ) {
 	tx := txFromCtx(ctx)
 
-	const q = "INSERT INTO user " +
+	const query = "INSERT INTO user " +
 		"(name, last_login_at, created_at, token) " +
 		"VALUES ($1, $2, $3, $4)" +
 		" RETURNING id"
 
 	row := tx.QueryRow(
 		ctx,
-		q,
-		o.name,
-		o.lastLoginAt,
-		o.createdAt,
-		o.token,
+		query,
+		v.name,
+		v.lastLoginAt,
+		v.createdAt,
+		v.token,
 	)
 
-	if err := row.Scan(&o.id); err != nil {
+	if err := row.Scan(
+		&v.id,
+	); err != nil {
 		panic(err)
 	}
 
-	o.loaded = true
+	v.loaded = true
 
-	o.origName = o.name
+	v.origName = v.name
 
-	o.origLastLoginAt = o.lastLoginAt
+	v.origLastLoginAt = v.lastLoginAt
 
-	o.origCreatedAt = o.createdAt
+	v.origCreatedAt = v.createdAt
 
-	o.origToken = o.token
+	v.origToken = v.token
 
-	o.dirty = make(map[string]struct{})
+	v.dirty = make(map[string]struct{})
 }

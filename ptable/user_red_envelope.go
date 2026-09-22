@@ -48,22 +48,24 @@ func loadedRedEnvelope(
 	total int32,
 ) *RedEnvelope {
 	return &RedEnvelope{
-		id:            id,
-		uid:           uid,
-		actId:         actId,
-		lastRefreshAt: lastRefreshAt,
-		todayCount:    todayCount,
-		total:         total,
-
+		id:                id,
+		uid:               uid,
+		actId:             actId,
+		lastRefreshAt:     lastRefreshAt,
+		todayCount:        todayCount,
+		total:             total,
 		loaded:            true,
 		origUid:           uid,
 		origActId:         actId,
 		origLastRefreshAt: lastRefreshAt,
 		origTodayCount:    todayCount,
 		origTotal:         total,
-
-		dirty: make(map[string]struct{}),
+		dirty:             make(map[string]struct{}),
 	}
+}
+
+func (o *RedEnvelope) Id() int64 {
+	return o.id
 }
 
 func (o *RedEnvelope) SetUid(v int64) {
@@ -131,12 +133,6 @@ func (o *RedEnvelope) Total() int32 {
 	return o.total
 }
 
-func (o *RedEnvelope) Id() int64 {
-	return o.id
-}
-
-// ResetToLoaded restores every non-primary-key field to the last
-// successfully loaded/inserted/updated snapshot.
 func (o *RedEnvelope) ResetToLoaded() {
 	o.uid = o.origUid
 	o.actId = o.origActId
@@ -149,7 +145,9 @@ func (o *RedEnvelope) ResetToLoaded() {
 
 const selectColumnsRedEnvelope = "id, uid, act_id, last_refresh_at, today_count, total"
 
-func scanRedEnvelope(row pgx.Row) *RedEnvelope {
+func scanRedEnvelopeRow(
+	row pgx.Row,
+) *RedEnvelope {
 	var (
 		id            int64
 		uid           int64
@@ -184,57 +182,186 @@ func scanRedEnvelope(row pgx.Row) *RedEnvelope {
 	)
 }
 
-func (redEnvelope) GetById(
+func scanRedEnvelopeRows(
+	rows pgx.Rows,
+) *RedEnvelope {
+	var (
+		id            int64
+		uid           int64
+		actId         int32
+		lastRefreshAt int64
+		todayCount    int32
+		total         int32
+	)
+
+	if err := rows.Scan(
+		&id,
+		&uid,
+		&actId,
+		&lastRefreshAt,
+		&todayCount,
+		&total,
+	); err != nil {
+		panic(err)
+	}
+
+	return loadedRedEnvelope(
+		id,
+		uid,
+		actId,
+		lastRefreshAt,
+		todayCount,
+		total,
+	)
+}
+
+func (o redEnvelope) getId(
 	ctx context.Context,
+	q Querier,
 	id int64,
 ) *RedEnvelope {
-	tx := txFromCtx(ctx)
-
-	const q = "SELECT " + selectColumnsRedEnvelope +
+	const query = "SELECT " + selectColumnsRedEnvelope +
 		" FROM user_red_envelope" +
 		" WHERE id = $1"
 
-	row := tx.QueryRow(
+	row := q.QueryRow(
 		ctx,
-		q,
+		query,
 		id,
 	)
 
-	return scanRedEnvelope(row)
+	return scanRedEnvelopeRow(row)
 }
 
-func (redEnvelope) GetByUidActId(
+func (o redEnvelope) GetById(
 	ctx context.Context,
+	id int64,
+) *RedEnvelope {
+	return o.getId(
+		ctx,
+		txFromCtx(ctx),
+		id,
+	)
+}
+
+func (o redEnvelope) SelectById(
+	ctx context.Context,
+	id int64,
+) *RedEnvelope {
+	return o.getId(
+		ctx,
+		querierFromCtx(ctx),
+		id,
+	)
+}
+
+func (o redEnvelope) getUidActId(
+	ctx context.Context,
+	q Querier,
 	uid int64, actId int32,
 ) *RedEnvelope {
-	tx := txFromCtx(ctx)
-
-	const q = "SELECT " + selectColumnsRedEnvelope +
+	const query = "SELECT " + selectColumnsRedEnvelope +
 		" FROM user_red_envelope" +
 		" WHERE uid = $1 AND act_id = $2"
 
-	row := tx.QueryRow(
+	row := q.QueryRow(
 		ctx,
-		q,
+		query,
 		uid, actId,
 	)
 
-	return scanRedEnvelope(row)
+	return scanRedEnvelopeRow(row)
 }
 
-func (redEnvelope) Update(
+func (o redEnvelope) GetByUidActId(
 	ctx context.Context,
-	o *RedEnvelope,
+	uid int64, actId int32,
+) *RedEnvelope {
+	return o.getUidActId(
+		ctx,
+		txFromCtx(ctx),
+		uid, actId,
+	)
+}
+
+func (o redEnvelope) SelectByUidActId(
+	ctx context.Context,
+	uid int64, actId int32,
+) *RedEnvelope {
+	return o.getUidActId(
+		ctx,
+		querierFromCtx(ctx),
+		uid, actId,
+	)
+}
+
+func (o redEnvelope) getAll(
+	ctx context.Context,
+	q Querier,
+) []*RedEnvelope {
+	const query = "SELECT " + selectColumnsRedEnvelope +
+		" FROM user_red_envelope"
+
+	rows, err := q.Query(
+		ctx,
+		query,
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer rows.Close()
+
+	var result []*RedEnvelope
+
+	for rows.Next() {
+		result = append(
+			result,
+			scanRedEnvelopeRows(rows),
+		)
+	}
+
+	if err := rows.Err(); err != nil {
+		panic(err)
+	}
+
+	return result
+}
+
+func (o redEnvelope) GetAll(
+	ctx context.Context,
+) []*RedEnvelope {
+	return o.getAll(
+		ctx,
+		txFromCtx(ctx),
+	)
+}
+
+func (o redEnvelope) SelectAll(
+	ctx context.Context,
+) []*RedEnvelope {
+	return o.getAll(
+		ctx,
+		querierFromCtx(ctx),
+	)
+}
+
+var ErrRedEnvelopeNotFound = errors.New(
+	"user_red_envelope: row not found at update time",
+)
+
+func (o redEnvelope) Update(
+	ctx context.Context,
+	v *RedEnvelope,
 ) error {
 	tx := txFromCtx(ctx)
 
-	if !o.loaded {
+	if !v.loaded {
 		return errors.New(
 			"update RedEnvelope must load first",
 		)
 	}
 
-	if len(o.dirty) == 0 {
+	if len(v.dirty) == 0 {
 		return nil
 	}
 
@@ -248,7 +375,7 @@ func (redEnvelope) Update(
 		return n
 	}
 
-	if _, ok := o.dirty["uid"]; ok {
+	if _, ok := v.dirty["uid"]; ok {
 		sets = append(
 			sets,
 			fmt.Sprintf(
@@ -259,11 +386,11 @@ func (redEnvelope) Update(
 
 		args = append(
 			args,
-			o.uid,
+			v.uid,
 		)
 	}
 
-	if _, ok := o.dirty["act_id"]; ok {
+	if _, ok := v.dirty["act_id"]; ok {
 		sets = append(
 			sets,
 			fmt.Sprintf(
@@ -274,11 +401,11 @@ func (redEnvelope) Update(
 
 		args = append(
 			args,
-			o.actId,
+			v.actId,
 		)
 	}
 
-	if _, ok := o.dirty["last_refresh_at"]; ok {
+	if _, ok := v.dirty["last_refresh_at"]; ok {
 		sets = append(
 			sets,
 			fmt.Sprintf(
@@ -289,11 +416,11 @@ func (redEnvelope) Update(
 
 		args = append(
 			args,
-			o.lastRefreshAt,
+			v.lastRefreshAt,
 		)
 	}
 
-	if _, ok := o.dirty["today_count"]; ok {
+	if _, ok := v.dirty["today_count"]; ok {
 		sets = append(
 			sets,
 			fmt.Sprintf(
@@ -304,11 +431,11 @@ func (redEnvelope) Update(
 
 		args = append(
 			args,
-			o.todayCount,
+			v.todayCount,
 		)
 	}
 
-	if _, ok := o.dirty["total"]; ok {
+	if _, ok := v.dirty["total"]; ok {
 		sets = append(
 			sets,
 			fmt.Sprintf(
@@ -319,19 +446,26 @@ func (redEnvelope) Update(
 
 		args = append(
 			args,
-			o.total,
+			v.total,
 		)
 	}
 
-	args = append(args, o.id)
+	args = append(
+		args,
+		v.id,
+	)
 
-	q := fmt.Sprintf(
+	query := fmt.Sprintf(
 		"UPDATE user_red_envelope SET %s WHERE id = $%d",
 		strings.Join(sets, ", "),
 		n+1,
 	)
 
-	tag, err := tx.Exec(ctx, q, args...)
+	tag, err := tx.Exec(
+		ctx,
+		query,
+		args...,
+	)
 	if err != nil {
 		panic(err)
 	}
@@ -340,61 +474,59 @@ func (redEnvelope) Update(
 		return ErrRedEnvelopeNotFound
 	}
 
-	o.origUid = o.uid
+	v.origUid = v.uid
 
-	o.origActId = o.actId
+	v.origActId = v.actId
 
-	o.origLastRefreshAt = o.lastRefreshAt
+	v.origLastRefreshAt = v.lastRefreshAt
 
-	o.origTodayCount = o.todayCount
+	v.origTodayCount = v.todayCount
 
-	o.origTotal = o.total
+	v.origTotal = v.total
 
-	o.dirty = make(map[string]struct{})
+	v.dirty = make(map[string]struct{})
 
 	return nil
 }
 
-var ErrRedEnvelopeNotFound = errors.New(
-	"user_red_envelope: row not found at update time",
-)
-
-func (redEnvelope) Insert(
+func (o redEnvelope) Insert(
 	ctx context.Context,
-	o *RedEnvelope,
+	v *RedEnvelope,
 ) {
 	tx := txFromCtx(ctx)
 
-	const q = "INSERT INTO user_red_envelope " +
+	const query = "INSERT INTO user_red_envelope " +
 		"(uid, act_id, last_refresh_at, today_count, total) " +
 		"VALUES ($1, $2, $3, $4, $5)" +
 		" RETURNING id"
 
 	row := tx.QueryRow(
 		ctx,
-		q,
-		o.uid,
-		o.actId,
-		o.lastRefreshAt,
-		o.todayCount,
-		o.total,
+		query,
+		v.uid,
+		v.actId,
+		v.lastRefreshAt,
+		v.todayCount,
+		v.total,
 	)
 
-	if err := row.Scan(&o.id); err != nil {
+	if err := row.Scan(
+		&v.id,
+	); err != nil {
 		panic(err)
 	}
 
-	o.loaded = true
+	v.loaded = true
 
-	o.origUid = o.uid
+	v.origUid = v.uid
 
-	o.origActId = o.actId
+	v.origActId = v.actId
 
-	o.origLastRefreshAt = o.lastRefreshAt
+	v.origLastRefreshAt = v.lastRefreshAt
 
-	o.origTodayCount = o.todayCount
+	v.origTodayCount = v.todayCount
 
-	o.origTotal = o.total
+	v.origTotal = v.total
 
-	o.dirty = make(map[string]struct{})
+	v.dirty = make(map[string]struct{})
 }
