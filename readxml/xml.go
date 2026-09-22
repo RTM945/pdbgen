@@ -9,10 +9,22 @@ import (
 )
 
 type Schema struct {
-	XMLName   xml.Name `xml:"pdb"`
-	Schema    string   `xml:"schema,attr"`
-	GenOutput string   `xml:"genOutput,attr"`
-	Package   string   `xml:"package,attr"`
+	XMLName      xml.Name `xml:"pdb"`
+	URL          string   `xml:"url,attr"`
+	GenOutput    string   `xml:"genOutput,attr"`
+	Schema       string   `xml:"schema,attr"`
+	Package      string   `xml:"package,attr"`
+	PoolMaxConns int32    `xml:"poolMaxConns,attr"`
+	PoolMinConns int32    `xml:"poolMinConns,attr"`
+
+	PoolMaxConnLifetime   int `xml:"poolMaxConnLifetime,attr"`
+	PoolMaxConnIdleTime   int `xml:"poolMaxConnIdleTime,attr"`
+	PoolHealthCheckPeriod int `xml:"poolHealthCheckPeriod,attr"`
+
+	StatementTimeoutMs                int `xml:"statementTimeoutMs,attr"`
+	IdleInTransactionSessionTimeoutMs int `xml:"idleInTransactionSessionTimeoutMs,attr"`
+
+	AppName string `xml:"appName,attr"`
 
 	Beans  []Bean  `xml:"bean"`
 	Tables []Table `xml:"table"`

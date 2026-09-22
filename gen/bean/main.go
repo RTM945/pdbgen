@@ -575,10 +575,6 @@ func main() {
 	}
 
 	if *outDir == "" {
-		*outDir = schema.GenOutput
-	}
-
-	if *outDir == "" {
 		*outDir = "./ptable"
 	}
 
