@@ -1,7 +1,7 @@
 # pdbgen
 ```
 <?xml version="1.0" encoding="UTF-8"?>
-<pdb url="postgres://app:app@127.0.0.1:5432/gamedb?sslmode=disable"
+<pdb url="postgres://app:app@127.0.0.1:6432/gamedb?sslmode=disable"
      genOutput="./ptable"
      schema="public"
      poolMaxConns="100" poolMinConns="10"
@@ -153,5 +153,27 @@ func (this *RedEnvelope) Receive(session *Session) {
 ```
 
 # todo 
-目前只能读写一行，需要多行的代码生成和业务逻辑支持 
+<del>目前只能读写一行，需要多行的代码生成和业务逻辑支持</del> 
 对于ResetToLoaded，因为在一次请求中可能涉及到多个表的改变，可能需要在ctx中记log，要回滚时log中的对象按顺序全部回滚
+
+#pg
+```
+docker pull postgres:14.24-alpine3.23
+docker pull edoburu/pgbouncer
+docker run --name my-postgres -e POSTGRES_PASSWORD=mysecretpassword -d postgres:14.24-alpine3.23
+docker exec my-postgres psql -U postgres -c "CREATE USER app WITH PASSWORD 'app';"
+docker exec my-postgres psql -U postgres -c "CREATE DATABASE gamedb OWNER app;"
+docker network create pgnet
+docker network connect pgnet my-postgres
+docker run -d \
+  --name my-pgbouncer \
+  --network pgnet \
+  -p 6432:6432 \
+  -e DATABASE_URL="postgres://app:app@my-postgres:5432/gamedb" \
+  -e LISTEN_PORT=6432 \
+  -e AUTH_TYPE=scram-sha-256 \
+  -e POOL_MODE=transaction \
+  -e DEFAULT_POOL_SIZE=20 \
+  -e MAX_CLIENT_CONN=100 \
+  edoburu/pgbouncer:latest
+```

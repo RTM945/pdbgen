@@ -13,7 +13,7 @@ import (
 )
 
 var (
-	db *pgxpool.Pool
+	dbpool *pgxpool.Pool
 
 	statementTimeoutMs                int
 	idleInTransactionSessionTimeoutMs int
@@ -32,7 +32,7 @@ func Init(ctx context.Context, pdb *readxml.Schema) error {
 	cfg.MaxConnLifetime = time.Duration(pdb.PoolMaxConnLifetime) * time.Second
 	cfg.MaxConnIdleTime = time.Duration(pdb.PoolMaxConnIdleTime) * time.Second
 	cfg.HealthCheckPeriod = time.Duration(pdb.PoolHealthCheckPeriod) * time.Second
-
+	cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeExec
 	if pdb.AppName != "" {
 		cfg.ConnConfig.RuntimeParams["application_name"] = pdb.AppName
 	}
@@ -40,7 +40,7 @@ func Init(ctx context.Context, pdb *readxml.Schema) error {
 	if err != nil {
 		return err
 	}
-	db = pool
+	dbpool = pool
 	statementTimeoutMs = pdb.StatementTimeoutMs
 	idleInTransactionSessionTimeoutMs = pdb.IdleInTransactionSessionTimeoutMs
 	lockTimeoutMs = pdb.LockTimeoutMs

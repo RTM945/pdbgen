@@ -53,12 +53,11 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	//conn, err := pgx.Connect(ctx, schema.URL)
-	//if err != nil {
-	//	panic(err)
-	//}
-	//defer conn.Close(ctx)
-	var conn *pgx.Conn
+	conn, err := pgx.Connect(ctx, schema.URL)
+	if err != nil {
+		panic(err)
+	}
+	defer conn.Close(ctx)
 
 	if err := generate(ctx, schema, conn); err != nil {
 		panic(err)
@@ -66,11 +65,10 @@ func main() {
 }
 
 func generate(ctx context.Context, schema *readxml.Schema, conn *pgx.Conn) error {
-	//dbTables, err := inspectDatabase(ctx, conn, schema.Schema)
-	//if err != nil {
-	//	return err
-	//}
-	dbTables := make(map[string]*DBTable)
+	dbTables, err := inspectDatabase(ctx, conn, schema.Schema)
+	if err != nil {
+		return err
+	}
 
 	var b strings.Builder
 
@@ -371,14 +369,25 @@ func generateMissingTableDDL(b *strings.Builder, schema *readxml.Schema, table r
 		if err != nil {
 			return fmt.Errorf("table %s column %s: %w", table.Name, v.Name, err)
 		}
-
-		fmt.Fprintf(
-			b,
-			"\t%s %s NOT NULL DEFAULT %s",
-			quoteIdent(readxml.SnakeCase(v.Name)),
-			columnType,
-			defaultValue,
-		)
+		if table.PrimaryKey != nil &&
+			v.Name == table.PrimaryKey.Variable &&
+			table.PrimaryKey.AutoIncrement {
+			// 自增主键由 IDENTITY 负责生成，不设置 DEFAULT
+			fmt.Fprintf(
+				b,
+				"\t%s %s NOT NULL",
+				quoteIdent(readxml.SnakeCase(v.Name)),
+				columnType,
+			)
+		} else {
+			fmt.Fprintf(
+				b,
+				"\t%s %s NOT NULL DEFAULT %s",
+				quoteIdent(readxml.SnakeCase(v.Name)),
+				columnType,
+				defaultValue,
+			)
+		}
 
 		if i != len(bean.Variables)-1 {
 			b.WriteString(",")
