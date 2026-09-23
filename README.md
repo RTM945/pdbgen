@@ -177,3 +177,10 @@ docker run -d \
   -e MAX_CLIENT_CONN=100 \
   edoburu/pgbouncer:latest
 ```
+
+# build 
+cd ../ddl/
+go build -o genddl.exe
+
+cd ..\bean\        
+go build -o genbeans.exe
