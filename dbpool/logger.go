@@ -2,7 +2,12 @@ package dbpool
 
 import (
 	"context"
+	"fmt"
 	"pdbgen/dbctx"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -18,8 +23,13 @@ func (o *loggingDB) Exec(
 	sql string,
 	args ...any,
 ) (pgconn.CommandTag, error) {
-	o.log(sql, args)
-	return o.DB.Exec(ctx, sql, args...)
+	start := time.Now()
+
+	tag, err := o.DB.Exec(ctx, sql, args...)
+
+	o.log(start, sql, args, err)
+
+	return tag, err
 }
 
 func (o *loggingDB) Query(
@@ -27,8 +37,13 @@ func (o *loggingDB) Query(
 	sql string,
 	args ...any,
 ) (pgx.Rows, error) {
-	o.log(sql, args)
-	return o.DB.Query(ctx, sql, args...)
+	start := time.Now()
+
+	rows, err := o.DB.Query(ctx, sql, args...)
+
+	o.log(start, sql, args, err)
+
+	return rows, err
 }
 
 func (o *loggingDB) QueryRow(
@@ -36,19 +51,31 @@ func (o *loggingDB) QueryRow(
 	sql string,
 	args ...any,
 ) pgx.Row {
-	o.log(sql, args)
-	return o.DB.QueryRow(ctx, sql, args...)
+	start := time.Now()
+
+	row := o.DB.QueryRow(ctx, sql, args...)
+
+	return &loggingRow{
+		row:    row,
+		start:  start,
+		sql:    sql,
+		args:   args,
+		logger: o.logger,
+	}
 }
 
-func (o *loggingDB) log(sql string, args []any) {
+func (o *loggingDB) log(start time.Time, sql string, args []any, err error) {
 	if o.logger == nil {
 		return
 	}
 
-	o.logger.Printf(
+	elapsed := time.Since(start)
+
+	o.logger.Println(
 		"sql",
-		"sql", sql,
-		"args", args,
+		"cost", elapsed,
+		"sql", formatSQL(sql, args),
+		"error", err,
 	)
 }
 
@@ -61,4 +88,57 @@ func wrapLogger(db dbctx.DB) dbctx.DB {
 		DB:     db,
 		logger: sqlLogger,
 	}
+}
+
+var placeholderRE = regexp.MustCompile(`\$([1-9][0-9]*)`)
+
+func formatSQL(sql string, args []any) string {
+	sql = placeholderRE.ReplaceAllStringFunc(sql, func(s string) string {
+		n, _ := strconv.Atoi(s[1:])
+		return fmt.Sprintf("%%[%d]s", n)
+	})
+
+	values := make([]any, len(args))
+	for i, arg := range args {
+		values[i] = sqlLiteral(arg)
+	}
+
+	return fmt.Sprintf(sql, values...)
+}
+
+func sqlLiteral(v any) string {
+	switch x := v.(type) {
+	case string:
+		return "'" + strings.ReplaceAll(x, "'", "''") + "'"
+	default:
+		return fmt.Sprintf("%v", x)
+	}
+}
+
+type loggingRow struct {
+	row    pgx.Row
+	start  time.Time
+	sql    string
+	args   []any
+	logger logger
+	logged bool
+}
+
+func (r *loggingRow) Scan(dest ...any) error {
+	err := r.row.Scan(dest...)
+
+	if !r.logged {
+		r.logged = true
+
+		if r.logger != nil {
+			r.logger.Println(
+				"sql",
+				"cost", time.Since(r.start),
+				"sql", formatSQL(r.sql, r.args),
+				"error", err,
+			)
+		}
+	}
+
+	return err
 }

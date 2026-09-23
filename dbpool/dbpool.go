@@ -25,7 +25,7 @@ var (
 )
 
 type logger interface {
-	Printf(format string, args ...any)
+	Println(v ...any)
 }
 
 var ErrAdvisoryLockNotAcquired = errors.New("advisory lock not acquired")
