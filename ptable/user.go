@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"pdbgen/dbctx"
 )
 
 var UserTable user
@@ -192,7 +193,7 @@ func scanUserRows(
 
 func (o user) getId(
 	ctx context.Context,
-	q Querier,
+	q dbctx.Querier,
 	registerUpdate bool,
 	id int64,
 ) *User {
@@ -211,7 +212,7 @@ func (o user) getId(
 		return nil
 	}
 	if registerUpdate {
-		registerDirtyObject(
+		dbctx.RegisterDirtyObject(
 			ctx,
 			obj,
 			func(ctx context.Context) error {
@@ -229,7 +230,7 @@ func (o user) GetById(
 ) *User {
 	return o.getId(
 		ctx,
-		txFromCtx(ctx),
+		dbctx.TxFromCtx(ctx),
 		true,
 		id,
 	)
@@ -241,7 +242,7 @@ func (o user) SelectById(
 ) *User {
 	return o.getId(
 		ctx,
-		querierFromCtx(ctx),
+		dbctx.QuerierFromCtx(ctx),
 		false,
 		id,
 	)
@@ -249,7 +250,7 @@ func (o user) SelectById(
 
 func (o user) getAll(
 	ctx context.Context,
-	q Querier,
+	q dbctx.Querier,
 	registerUpdate bool,
 ) []*User {
 	const query = "SELECT " + selectColumnsUser +
@@ -269,7 +270,7 @@ func (o user) getAll(
 	for rows.Next() {
 		obj := scanUserRows(rows)
 		if registerUpdate {
-			registerDirtyObject(
+			dbctx.RegisterDirtyObject(
 				ctx,
 				obj,
 				func(ctx context.Context) error {
@@ -295,7 +296,7 @@ func (o user) GetAll(
 ) []*User {
 	return o.getAll(
 		ctx,
-		txFromCtx(ctx),
+		dbctx.TxFromCtx(ctx),
 		true,
 	)
 }
@@ -305,7 +306,7 @@ func (o user) SelectAll(
 ) []*User {
 	return o.getAll(
 		ctx,
-		querierFromCtx(ctx),
+		dbctx.QuerierFromCtx(ctx),
 		false,
 	)
 }
@@ -318,7 +319,7 @@ func (o user) Update(
 	ctx context.Context,
 	v *User,
 ) error {
-	tx := txFromCtx(ctx)
+	tx := dbctx.TxFromCtx(ctx)
 
 	if !v.loaded {
 		return errors.New(
@@ -441,7 +442,7 @@ func (o user) Insert(
 	ctx context.Context,
 	v *User,
 ) {
-	tx := txFromCtx(ctx)
+	tx := dbctx.TxFromCtx(ctx)
 
 	const query = "INSERT INTO user " +
 		"(name, last_login_at, created_at, token) " +
@@ -475,7 +476,7 @@ func (o user) Insert(
 
 	v.dirty = make(map[string]struct{})
 
-	registerDirtyObject(
+	dbctx.RegisterDirtyObject(
 		ctx,
 		v,
 		func(ctx context.Context) error {

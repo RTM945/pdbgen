@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"pdbgen/dbctx"
 )
 
 var UserRedEnvelopeTable redEnvelope
@@ -217,7 +218,7 @@ func scanRedEnvelopeRows(
 
 func (o redEnvelope) getId(
 	ctx context.Context,
-	q Querier,
+	q dbctx.Querier,
 	registerUpdate bool,
 	id int64,
 ) *RedEnvelope {
@@ -236,7 +237,7 @@ func (o redEnvelope) getId(
 		return nil
 	}
 	if registerUpdate {
-		registerDirtyObject(
+		dbctx.RegisterDirtyObject(
 			ctx,
 			obj,
 			func(ctx context.Context) error {
@@ -254,7 +255,7 @@ func (o redEnvelope) GetById(
 ) *RedEnvelope {
 	return o.getId(
 		ctx,
-		txFromCtx(ctx),
+		dbctx.TxFromCtx(ctx),
 		true,
 		id,
 	)
@@ -266,7 +267,7 @@ func (o redEnvelope) SelectById(
 ) *RedEnvelope {
 	return o.getId(
 		ctx,
-		querierFromCtx(ctx),
+		dbctx.QuerierFromCtx(ctx),
 		false,
 		id,
 	)
@@ -274,7 +275,7 @@ func (o redEnvelope) SelectById(
 
 func (o redEnvelope) getUidActId(
 	ctx context.Context,
-	q Querier,
+	q dbctx.Querier,
 	registerUpdate bool,
 	uid int64, actId int32,
 ) *RedEnvelope {
@@ -293,7 +294,7 @@ func (o redEnvelope) getUidActId(
 		return nil
 	}
 	if registerUpdate {
-		registerDirtyObject(
+		dbctx.RegisterDirtyObject(
 			ctx,
 			obj,
 			func(ctx context.Context) error {
@@ -311,7 +312,7 @@ func (o redEnvelope) GetByUidActId(
 ) *RedEnvelope {
 	return o.getUidActId(
 		ctx,
-		txFromCtx(ctx),
+		dbctx.TxFromCtx(ctx),
 		true,
 		uid, actId,
 	)
@@ -323,7 +324,7 @@ func (o redEnvelope) SelectByUidActId(
 ) *RedEnvelope {
 	return o.getUidActId(
 		ctx,
-		querierFromCtx(ctx),
+		dbctx.QuerierFromCtx(ctx),
 		false,
 		uid, actId,
 	)
@@ -331,7 +332,7 @@ func (o redEnvelope) SelectByUidActId(
 
 func (o redEnvelope) getAll(
 	ctx context.Context,
-	q Querier,
+	q dbctx.Querier,
 	registerUpdate bool,
 ) []*RedEnvelope {
 	const query = "SELECT " + selectColumnsRedEnvelope +
@@ -351,7 +352,7 @@ func (o redEnvelope) getAll(
 	for rows.Next() {
 		obj := scanRedEnvelopeRows(rows)
 		if registerUpdate {
-			registerDirtyObject(
+			dbctx.RegisterDirtyObject(
 				ctx,
 				obj,
 				func(ctx context.Context) error {
@@ -377,7 +378,7 @@ func (o redEnvelope) GetAll(
 ) []*RedEnvelope {
 	return o.getAll(
 		ctx,
-		txFromCtx(ctx),
+		dbctx.TxFromCtx(ctx),
 		true,
 	)
 }
@@ -387,7 +388,7 @@ func (o redEnvelope) SelectAll(
 ) []*RedEnvelope {
 	return o.getAll(
 		ctx,
-		querierFromCtx(ctx),
+		dbctx.QuerierFromCtx(ctx),
 		false,
 	)
 }
@@ -400,7 +401,7 @@ func (o redEnvelope) Update(
 	ctx context.Context,
 	v *RedEnvelope,
 ) error {
-	tx := txFromCtx(ctx)
+	tx := dbctx.TxFromCtx(ctx)
 
 	if !v.loaded {
 		return errors.New(
@@ -540,7 +541,7 @@ func (o redEnvelope) Insert(
 	ctx context.Context,
 	v *RedEnvelope,
 ) {
-	tx := txFromCtx(ctx)
+	tx := dbctx.TxFromCtx(ctx)
 
 	const query = "INSERT INTO user_red_envelope " +
 		"(uid, act_id, last_refresh_at, today_count, total) " +
@@ -577,7 +578,7 @@ func (o redEnvelope) Insert(
 
 	v.dirty = make(map[string]struct{})
 
-	registerDirtyObject(
+	dbctx.RegisterDirtyObject(
 		ctx,
 		v,
 		func(ctx context.Context) error {

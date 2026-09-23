@@ -25,6 +25,8 @@ type Schema struct {
 	IdleInTransactionSessionTimeoutMs int `xml:"idleInTransactionSessionTimeoutMs,attr"`
 	LockTimeoutMs                     int `xml:"lockTimeoutMs,attr"`
 
+	ShowSQL bool `xml:"showSQL,attr"`
+
 	AppName string `xml:"appName,attr"`
 
 	Beans  []Bean  `xml:"bean"`

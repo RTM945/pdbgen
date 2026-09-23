@@ -7,6 +7,7 @@
      poolHealthCheckPeriod="60"
      statementTimeoutMs="5000" idleInTransactionSessionTimeoutMs="5000"
      lockTimeoutMs="1000"
+     showSQL="true"
      appName="lobby-svc">
     <!--
     CREATE TABLE IF NOT EXISTS users (

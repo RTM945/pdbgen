@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"pdbgen/dbctx"
 )
 
 var UserMailTable mail
@@ -242,7 +243,7 @@ func scanMailRows(
 
 func (o mail) getId(
 	ctx context.Context,
-	q Querier,
+	q dbctx.Querier,
 	registerUpdate bool,
 	id int64,
 ) *Mail {
@@ -261,7 +262,7 @@ func (o mail) getId(
 		return nil
 	}
 	if registerUpdate {
-		registerDirtyObject(
+		dbctx.RegisterDirtyObject(
 			ctx,
 			obj,
 			func(ctx context.Context) error {
@@ -279,7 +280,7 @@ func (o mail) GetById(
 ) *Mail {
 	return o.getId(
 		ctx,
-		txFromCtx(ctx),
+		dbctx.TxFromCtx(ctx),
 		true,
 		id,
 	)
@@ -291,7 +292,7 @@ func (o mail) SelectById(
 ) *Mail {
 	return o.getId(
 		ctx,
-		querierFromCtx(ctx),
+		dbctx.QuerierFromCtx(ctx),
 		false,
 		id,
 	)
@@ -299,7 +300,7 @@ func (o mail) SelectById(
 
 func (o mail) listUidConfId(
 	ctx context.Context,
-	q Querier,
+	q dbctx.Querier,
 	registerUpdate bool,
 	uid int64, confId int32,
 ) []*Mail {
@@ -322,7 +323,7 @@ func (o mail) listUidConfId(
 	for rows.Next() {
 		obj := scanMailRows(rows)
 		if registerUpdate {
-			registerDirtyObject(
+			dbctx.RegisterDirtyObject(
 				ctx,
 				obj,
 				func(ctx context.Context) error {
@@ -349,7 +350,7 @@ func (o mail) ListByUidConfId(
 ) []*Mail {
 	return o.listUidConfId(
 		ctx,
-		txFromCtx(ctx),
+		dbctx.TxFromCtx(ctx),
 		true,
 		uid, confId,
 	)
@@ -361,7 +362,7 @@ func (o mail) SelectListByUidConfId(
 ) []*Mail {
 	return o.listUidConfId(
 		ctx,
-		querierFromCtx(ctx),
+		dbctx.QuerierFromCtx(ctx),
 		false,
 		uid, confId,
 	)
@@ -369,7 +370,7 @@ func (o mail) SelectListByUidConfId(
 
 func (o mail) getAll(
 	ctx context.Context,
-	q Querier,
+	q dbctx.Querier,
 	registerUpdate bool,
 ) []*Mail {
 	const query = "SELECT " + selectColumnsMail +
@@ -389,7 +390,7 @@ func (o mail) getAll(
 	for rows.Next() {
 		obj := scanMailRows(rows)
 		if registerUpdate {
-			registerDirtyObject(
+			dbctx.RegisterDirtyObject(
 				ctx,
 				obj,
 				func(ctx context.Context) error {
@@ -415,7 +416,7 @@ func (o mail) GetAll(
 ) []*Mail {
 	return o.getAll(
 		ctx,
-		txFromCtx(ctx),
+		dbctx.TxFromCtx(ctx),
 		true,
 	)
 }
@@ -425,7 +426,7 @@ func (o mail) SelectAll(
 ) []*Mail {
 	return o.getAll(
 		ctx,
-		querierFromCtx(ctx),
+		dbctx.QuerierFromCtx(ctx),
 		false,
 	)
 }
@@ -438,7 +439,7 @@ func (o mail) Update(
 	ctx context.Context,
 	v *Mail,
 ) error {
-	tx := txFromCtx(ctx)
+	tx := dbctx.TxFromCtx(ctx)
 
 	if !v.loaded {
 		return errors.New(
@@ -595,7 +596,7 @@ func (o mail) Insert(
 	ctx context.Context,
 	v *Mail,
 ) {
-	tx := txFromCtx(ctx)
+	tx := dbctx.TxFromCtx(ctx)
 
 	const query = "INSERT INTO user_mail " +
 		"(uid, conf_id, state, receive_at, params, award_list) " +
@@ -635,7 +636,7 @@ func (o mail) Insert(
 
 	v.dirty = make(map[string]struct{})
 
-	registerDirtyObject(
+	dbctx.RegisterDirtyObject(
 		ctx,
 		v,
 		func(ctx context.Context) error {

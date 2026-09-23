@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"pdbgen/dbctx"
 )
 
 var UserGmMailTable gMMail
@@ -267,7 +268,7 @@ func scanGMMailRows(
 
 func (o gMMail) getId(
 	ctx context.Context,
-	q Querier,
+	q dbctx.Querier,
 	registerUpdate bool,
 	id int64,
 ) *GMMail {
@@ -286,7 +287,7 @@ func (o gMMail) getId(
 		return nil
 	}
 	if registerUpdate {
-		registerDirtyObject(
+		dbctx.RegisterDirtyObject(
 			ctx,
 			obj,
 			func(ctx context.Context) error {
@@ -304,7 +305,7 @@ func (o gMMail) GetById(
 ) *GMMail {
 	return o.getId(
 		ctx,
-		txFromCtx(ctx),
+		dbctx.TxFromCtx(ctx),
 		true,
 		id,
 	)
@@ -316,7 +317,7 @@ func (o gMMail) SelectById(
 ) *GMMail {
 	return o.getId(
 		ctx,
-		querierFromCtx(ctx),
+		dbctx.QuerierFromCtx(ctx),
 		false,
 		id,
 	)
@@ -324,7 +325,7 @@ func (o gMMail) SelectById(
 
 func (o gMMail) getAll(
 	ctx context.Context,
-	q Querier,
+	q dbctx.Querier,
 	registerUpdate bool,
 ) []*GMMail {
 	const query = "SELECT " + selectColumnsGMMail +
@@ -344,7 +345,7 @@ func (o gMMail) getAll(
 	for rows.Next() {
 		obj := scanGMMailRows(rows)
 		if registerUpdate {
-			registerDirtyObject(
+			dbctx.RegisterDirtyObject(
 				ctx,
 				obj,
 				func(ctx context.Context) error {
@@ -370,7 +371,7 @@ func (o gMMail) GetAll(
 ) []*GMMail {
 	return o.getAll(
 		ctx,
-		txFromCtx(ctx),
+		dbctx.TxFromCtx(ctx),
 		true,
 	)
 }
@@ -380,7 +381,7 @@ func (o gMMail) SelectAll(
 ) []*GMMail {
 	return o.getAll(
 		ctx,
-		querierFromCtx(ctx),
+		dbctx.QuerierFromCtx(ctx),
 		false,
 	)
 }
@@ -393,7 +394,7 @@ func (o gMMail) Update(
 	ctx context.Context,
 	v *GMMail,
 ) error {
-	tx := txFromCtx(ctx)
+	tx := dbctx.TxFromCtx(ctx)
 
 	if !v.loaded {
 		return errors.New(
@@ -567,7 +568,7 @@ func (o gMMail) Insert(
 	ctx context.Context,
 	v *GMMail,
 ) {
-	tx := txFromCtx(ctx)
+	tx := dbctx.TxFromCtx(ctx)
 
 	const query = "INSERT INTO user_gm_mail " +
 		"(params, award_list, start_at, end_at, channel, user_created_at, condition) " +
@@ -610,7 +611,7 @@ func (o gMMail) Insert(
 
 	v.dirty = make(map[string]struct{})
 
-	registerDirtyObject(
+	dbctx.RegisterDirtyObject(
 		ctx,
 		v,
 		func(ctx context.Context) error {

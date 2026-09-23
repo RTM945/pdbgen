@@ -45,40 +45,6 @@ func main() {
 
 		fmt.Printf("generated %s\n", output)
 	}
-
-	tpl, err := template.New("context").Parse(constTemplate)
-	if err != nil {
-		panic(err)
-	}
-	var buf bytes.Buffer
-
-	var data = struct {
-		Package string
-	}{
-		Package: schema.Package,
-	}
-
-	if err := tpl.Execute(&buf, data); err != nil {
-		panic(err)
-	}
-
-	formatted, err := format.Source(buf.Bytes())
-	if err != nil {
-		panic(err)
-	}
-
-	filename := "context.go"
-	output := filepath.Join(schema.GenOutput, filename)
-
-	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
-		panic(err)
-	}
-
-	if err := os.WriteFile(output, formatted, 0o644); err != nil {
-		panic(err)
-	}
-
-	fmt.Printf("generated %s\n", output)
 }
 
 func generateTable(schema *readxml.Schema, table readxml.Table) ([]byte, error) {

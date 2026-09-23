@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"pdbgen/ptable"
+	"log"
+	"pdbgen/dbctx"
 	"pdbgen/readxml"
 	"strconv"
 	"time"
@@ -19,7 +20,13 @@ var (
 	statementTimeoutMs                int
 	idleInTransactionSessionTimeoutMs int
 	lockTimeoutMs                     int
+	sqlLogger                         logger
+	showSQL                           bool
 )
+
+type logger interface {
+	Printf(format string, args ...any)
+}
 
 var ErrAdvisoryLockNotAcquired = errors.New("advisory lock not acquired")
 
@@ -45,6 +52,8 @@ func Init(ctx context.Context, pdb *readxml.Schema) error {
 	statementTimeoutMs = pdb.StatementTimeoutMs
 	idleInTransactionSessionTimeoutMs = pdb.IdleInTransactionSessionTimeoutMs
 	lockTimeoutMs = pdb.LockTimeoutMs
+	showSQL = pdb.ShowSQL
+	sqlLogger = log.Default()
 	return nil
 }
 
@@ -74,12 +83,12 @@ func Query[T any](ctx context.Context, fn func(context.Context) (T, error)) (T, 
 	// 不允许在事务中调用 Query。
 	// 否则容易出现事务里已经修改数据，但 Query 却从
 	// pool 的另一条 PostgreSQL connection 读取的问题。
-	if ptable.HasTx(ctx) {
+	if dbctx.HasTx(ctx) {
 		var zero T
 		return zero, errors.New("dbpool.Query cannot be called inside transaction")
 	}
 
-	ctx = ptable.WithQuerier(ctx, dbpool)
+	ctx = dbctx.WithQuerier(ctx, wrapLogger(dbpool))
 
 	return fn(ctx)
 }
@@ -95,9 +104,9 @@ func withTx(ctx context.Context, prepare func(context.Context, pgx.Tx) error, fn
 	}
 
 	uow := NewUnitOfWork()
-
-	ctx = ptable.WithTx(ctx, tx)
-	ctx = ptable.WithUnitOfWork(ctx, uow)
+	db := wrapLogger(tx)
+	ctx = dbctx.WithTx(ctx, db)
+	ctx = dbctx.WithUnitOfWork(ctx, uow)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -165,7 +174,7 @@ func withAdvisoryLock(ctx context.Context, lockKey string, lockValue int64, tryL
 		}
 	} else {
 		prepare = func(ctx context.Context, tx pgx.Tx) error {
-			_, err := tx.Exec(ctx, "SELECT pg_try_advisory_xact_lock(hashtext($1), $2", lockKey, lockValue)
+			_, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1), $2", lockKey, lockValue)
 			if err != nil {
 				panic(err)
 			}
