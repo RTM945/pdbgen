@@ -57,7 +57,7 @@ func Init(ctx context.Context, pdb *readxml.Schema) error {
 	return nil
 }
 
-func setLocalTimeout(ctx context.Context, tx pgx.Tx) error {
+func setLocalTimeout(ctx context.Context, tx dbctx.DB) error {
 	if statementTimeoutMs > 0 {
 		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = "+strconv.Itoa(statementTimeoutMs)); err != nil {
 			return fmt.Errorf("set statement_timeout: %w", err)
@@ -97,7 +97,7 @@ func WithTx(ctx context.Context, fn func(context.Context) error) error {
 	return withTx(ctx, nil, fn)
 }
 
-func withTx(ctx context.Context, prepare func(context.Context, pgx.Tx) error, fn func(context.Context) error) (err error) {
+func withTx(ctx context.Context, prepare func(context.Context, dbctx.DB) error, fn func(context.Context) error) (err error) {
 	tx, err := dbpool.Begin(ctx)
 	if err != nil {
 		return err
@@ -132,12 +132,12 @@ func withTx(ctx context.Context, prepare func(context.Context, pgx.Tx) error, fn
 		}
 	}()
 
-	if err = setLocalTimeout(ctx, tx); err != nil {
+	if err = setLocalTimeout(ctx, db); err != nil {
 		return err
 	}
 
 	if prepare != nil {
-		if err = prepare(ctx, tx); err != nil {
+		if err = prepare(ctx, db); err != nil {
 			return err
 		}
 	}
@@ -156,13 +156,13 @@ func WithAdvisoryLock(ctx context.Context, lockKey string, lockValue int64, fn f
 }
 
 func withAdvisoryLock(ctx context.Context, lockKey string, lockValue int64, tryLock bool, fn func(context.Context) error) (err error) {
-	var prepare func(ctx context.Context, tx pgx.Tx) error
+	var prepare func(ctx context.Context, tx dbctx.DB) error
 
 	if tryLock {
-		prepare = func(ctx context.Context, tx pgx.Tx) error {
+		prepare = func(ctx context.Context, tx dbctx.DB) error {
 			var locked bool
 
-			err := tx.QueryRow(ctx, "SELECT pg_try_advisory_xact_lock(hashtext($1), $2", lockKey, lockValue).Scan(&locked)
+			err := tx.QueryRow(ctx, "SELECT pg_try_advisory_xact_lock(hashtext($1), $2)", lockKey, lockValue).Scan(&locked)
 			if err != nil {
 				panic(err)
 			}
@@ -173,7 +173,7 @@ func withAdvisoryLock(ctx context.Context, lockKey string, lockValue int64, tryL
 			return nil
 		}
 	} else {
-		prepare = func(ctx context.Context, tx pgx.Tx) error {
+		prepare = func(ctx context.Context, tx dbctx.DB) error {
 			_, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1), $2", lockKey, lockValue)
 			if err != nil {
 				panic(err)
