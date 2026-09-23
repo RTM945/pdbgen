@@ -22,6 +22,10 @@ type Querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
+func HasTx(ctx context.Context) bool {
+	return ctx.Value(txKey{}) != nil
+}
+
 func txFromCtx(ctx context.Context) DBTX {
 	return ctx.Value(txKey{}).(DBTX)
 }
@@ -31,14 +35,22 @@ func txFromCtxOptional(ctx context.Context) (DBTX, bool) {
 	if res == nil {
 		return nil, false
 	}
+
 	return res.(DBTX), true
 }
 
 func querierFromCtx(ctx context.Context) Querier {
 	if _, ok := txFromCtxOptional(ctx); ok {
-		// 这里直接 panic
-		// SelectByXXX 就是明确要求事务外只读
 		panic("SelectByXXX cannot be called inside transaction")
 	}
+
 	return ctx.Value(querierKey{}).(Querier)
+}
+
+func WithTx(ctx context.Context, tx DBTX) context.Context {
+	return context.WithValue(ctx, txKey{}, tx)
+}
+
+func WithQuerier(ctx context.Context, q Querier) context.Context {
+	return context.WithValue(ctx, querierKey{}, q)
 }

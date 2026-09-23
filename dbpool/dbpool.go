@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"pdbgen/ptable"
 	"pdbgen/readxml"
 	"strconv"
 	"time"
@@ -67,4 +68,60 @@ func setLocalTimeout(ctx context.Context, tx pgx.Tx) error {
 	}
 
 	return nil
+}
+
+func withAdvisoryLock(ctx context.Context, f func(ctx context.Context) error) error {
+	tx, err := dbpool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			_ = tx.Rollback(context.Background())
+			panic(r)
+		}
+
+		if err != nil {
+			_ = tx.Rollback(context.Background())
+			return
+		}
+
+		if commitErr := tx.Commit(ctx); commitErr != nil {
+			err = fmt.Errorf("commit transaction: %w", commitErr)
+		}
+	}()
+	if err := setLocalTimeout(ctx, tx); err != nil {
+		_ = tx.Rollback(context.Background())
+		return err
+	}
+
+	if tryLock {
+		var locked bool
+
+		err := tx.QueryRow(
+			ctx,
+			"SELECT pg_try_advisory_xact_lock($1)",
+			key,
+		).Scan(&locked)
+		if err != nil {
+			panic(err)
+		}
+
+		if !locked {
+			return ErrAdvisoryLockNotAcquired
+		}
+	} else {
+		_, err := tx.Exec(
+			ctx,
+			"SELECT pg_advisory_xact_lock($1)",
+			key,
+		)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	ctx = ptable.WithTx(ctx, tx)
+
+	return fn(ctx)
 }

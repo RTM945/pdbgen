@@ -19,35 +19,11 @@ func main() {
 		"schema xml file",
 	)
 
-	outDir := flag.String(
-		"out",
-		"ptable",
-		"generated output directory; default: genOutput in schema",
-	)
-
-	packageName := flag.String(
-		"package",
-		"ptable",
-		"generated package name",
-	)
-
 	flag.Parse()
 
 	schema, err := readxml.LoadSchema(*schemaFile)
 	if err != nil {
 		panic(err)
-	}
-
-	// schema 中指定了 package 时，以 schema 为准；
-	// 命令行显式传入 -package 时覆盖。
-	if schema.Package == "" {
-		schema.Package = *packageName
-	} else if *packageName != "ptable" {
-		schema.Package = *packageName
-	}
-
-	if *outDir == "" {
-		*outDir = "./ptable"
 	}
 
 	for _, table := range schema.Tables {
@@ -57,7 +33,7 @@ func main() {
 		}
 
 		filename := table.Name + ".go"
-		output := filepath.Join(*outDir, filename)
+		output := filepath.Join(schema.GenOutput, filename)
 
 		if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
 			panic(err)
@@ -76,7 +52,13 @@ func main() {
 	}
 	var buf bytes.Buffer
 
-	if err := tpl.Execute(&buf, nil); err != nil {
+	var data = struct {
+		Package string
+	}{
+		Package: schema.Package,
+	}
+
+	if err := tpl.Execute(&buf, data); err != nil {
 		panic(err)
 	}
 
@@ -86,7 +68,7 @@ func main() {
 	}
 
 	filename := "const.go"
-	output := filepath.Join(*outDir, filename)
+	output := filepath.Join(schema.GenOutput, filename)
 
 	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
 		panic(err)
