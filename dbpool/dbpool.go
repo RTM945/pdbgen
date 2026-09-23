@@ -70,7 +70,17 @@ func setLocalTimeout(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
-func withAdvisoryLock(ctx context.Context, f func(ctx context.Context) error) error {
+// WithTryAdvisoryLock 拿不到锁时会直接返回
+func WithTryAdvisoryLock(ctx context.Context, key int64, fn func(context.Context) error) error {
+	return withAdvisoryLock(ctx, key, true, fn)
+}
+
+// WithAdvisoryLock 拿不到锁时会阻塞
+func WithAdvisoryLock(ctx context.Context, key int64, fn func(context.Context) error) error {
+	return withAdvisoryLock(ctx, key, false, fn)
+}
+
+func withAdvisoryLock(ctx context.Context, key int64, tryLock bool, fn func(context.Context) error) (err error) {
 	tx, err := dbpool.Begin(ctx)
 	if err != nil {
 		return err
@@ -98,11 +108,7 @@ func withAdvisoryLock(ctx context.Context, f func(ctx context.Context) error) er
 	if tryLock {
 		var locked bool
 
-		err := tx.QueryRow(
-			ctx,
-			"SELECT pg_try_advisory_xact_lock($1)",
-			key,
-		).Scan(&locked)
+		err := tx.QueryRow(ctx, "SELECT pg_try_advisory_xact_lock($1)", key).Scan(&locked)
 		if err != nil {
 			panic(err)
 		}
@@ -111,11 +117,7 @@ func withAdvisoryLock(ctx context.Context, f func(ctx context.Context) error) er
 			return ErrAdvisoryLockNotAcquired
 		}
 	} else {
-		_, err := tx.Exec(
-			ctx,
-			"SELECT pg_advisory_xact_lock($1)",
-			key,
-		)
+		_, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", key)
 		if err != nil {
 			panic(err)
 		}
