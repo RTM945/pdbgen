@@ -10,6 +10,7 @@ import (
 
 type txKey struct{}
 type querierKey struct{}
+type unitOfWorkKey struct{}
 
 type DBTX interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -20,6 +21,10 @@ type DBTX interface {
 type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+type UnitOfWork interface {
+	Register(obj any, update func(context.Context) error)
 }
 
 func HasTx(ctx context.Context) bool {
@@ -53,4 +58,20 @@ func WithTx(ctx context.Context, tx DBTX) context.Context {
 
 func WithQuerier(ctx context.Context, q Querier) context.Context {
 	return context.WithValue(ctx, querierKey{}, q)
+}
+
+func WithUnitOfWork(ctx context.Context, uow UnitOfWork) context.Context {
+	return context.WithValue(ctx, unitOfWorkKey{}, uow)
+}
+
+func registerDirtyObject(ctx context.Context, obj any, update func(context.Context) error) {
+	value := ctx.Value(unitOfWorkKey{})
+	if value == nil {
+		// 非事务查询，例如 GM/RPC SelectXXX。
+		return
+	}
+
+	uow := value.(UnitOfWork)
+
+	uow.Register(obj, update)
 }

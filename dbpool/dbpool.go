@@ -70,21 +70,35 @@ func setLocalTimeout(ctx context.Context, tx pgx.Tx) error {
 	return nil
 }
 
-// WithTryAdvisoryLock 拿不到锁时会直接返回
-func WithTryAdvisoryLock(ctx context.Context, key int64, fn func(context.Context) error) error {
-	return withAdvisoryLock(ctx, key, true, fn)
+func Query[T any](ctx context.Context, fn func(context.Context) (T, error)) (T, error) {
+	// 不允许在事务中调用 Query。
+	// 否则容易出现事务里已经修改数据，但 Query 却从
+	// pool 的另一条 PostgreSQL connection 读取的问题。
+	if ptable.HasTx(ctx) {
+		var zero T
+		return zero, errors.New("dbpool.Query cannot be called inside transaction")
+	}
+
+	ctx = ptable.WithQuerier(ctx, dbpool)
+
+	return fn(ctx)
 }
 
-// WithAdvisoryLock 拿不到锁时会阻塞
-func WithAdvisoryLock(ctx context.Context, key int64, fn func(context.Context) error) error {
-	return withAdvisoryLock(ctx, key, false, fn)
+func WithTx(ctx context.Context, fn func(context.Context) error) error {
+	return withTx(ctx, nil, fn)
 }
 
-func withAdvisoryLock(ctx context.Context, key int64, tryLock bool, fn func(context.Context) error) (err error) {
+func withTx(ctx context.Context, prepare func(context.Context, pgx.Tx) error, fn func(context.Context) error) (err error) {
 	tx, err := dbpool.Begin(ctx)
 	if err != nil {
 		return err
 	}
+
+	uow := NewUnitOfWork()
+
+	ctx = ptable.WithTx(ctx, tx)
+	ctx = ptable.WithUnitOfWork(ctx, uow)
+
 	defer func() {
 		if r := recover(); r != nil {
 			_ = tx.Rollback(context.Background())
@@ -96,34 +110,68 @@ func withAdvisoryLock(ctx context.Context, key int64, tryLock bool, fn func(cont
 			return
 		}
 
-		if commitErr := tx.Commit(ctx); commitErr != nil {
-			err = fmt.Errorf("commit transaction: %w", commitErr)
+		// 所有业务执行完成后，按注册顺序 flush dirty object。
+		if err = uow.Flush(ctx); err != nil {
+			_ = tx.Rollback(context.Background())
+			return
+		}
+
+		// Commit 失败时事务状态可能已经不确定，
+		// 不再依赖 Rollback。
+		if err = tx.Commit(ctx); err != nil {
+			return
 		}
 	}()
-	if err := setLocalTimeout(ctx, tx); err != nil {
-		_ = tx.Rollback(context.Background())
+
+	if err = setLocalTimeout(ctx, tx); err != nil {
 		return err
 	}
 
-	if tryLock {
-		var locked bool
-
-		err := tx.QueryRow(ctx, "SELECT pg_try_advisory_xact_lock($1)", key).Scan(&locked)
-		if err != nil {
-			panic(err)
-		}
-
-		if !locked {
-			return ErrAdvisoryLockNotAcquired
-		}
-	} else {
-		_, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", key)
-		if err != nil {
-			panic(err)
+	if prepare != nil {
+		if err = prepare(ctx, tx); err != nil {
+			return err
 		}
 	}
 
-	ctx = ptable.WithTx(ctx, tx)
-
 	return fn(ctx)
+}
+
+// WithTryAdvisoryLock 拿不到锁时会直接返回
+func WithTryAdvisoryLock(ctx context.Context, lockKey string, lockValue int64, fn func(context.Context) error) error {
+	return withAdvisoryLock(ctx, lockKey, lockValue, true, fn)
+}
+
+// WithAdvisoryLock 拿不到锁时会阻塞
+func WithAdvisoryLock(ctx context.Context, lockKey string, lockValue int64, fn func(context.Context) error) error {
+	return withAdvisoryLock(ctx, lockKey, lockValue, false, fn)
+}
+
+func withAdvisoryLock(ctx context.Context, lockKey string, lockValue int64, tryLock bool, fn func(context.Context) error) (err error) {
+	var prepare func(ctx context.Context, tx pgx.Tx) error
+
+	if tryLock {
+		prepare = func(ctx context.Context, tx pgx.Tx) error {
+			var locked bool
+
+			err := tx.QueryRow(ctx, "SELECT pg_try_advisory_xact_lock(hashtext($1), $2", lockKey, lockValue).Scan(&locked)
+			if err != nil {
+				panic(err)
+			}
+
+			if !locked {
+				return ErrAdvisoryLockNotAcquired
+			}
+			return nil
+		}
+	} else {
+		prepare = func(ctx context.Context, tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, "SELECT pg_try_advisory_xact_lock(hashtext($1), $2", lockKey, lockValue)
+			if err != nil {
+				panic(err)
+			}
+			return nil
+		}
+	}
+
+	return withTx(ctx, prepare, fn)
 }

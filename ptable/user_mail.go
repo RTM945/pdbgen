@@ -243,6 +243,7 @@ func scanMailRows(
 func (o mail) getId(
 	ctx context.Context,
 	q Querier,
+	registerUpdate bool,
 	id int64,
 ) *Mail {
 	const query = "SELECT " + selectColumnsMail +
@@ -255,7 +256,21 @@ func (o mail) getId(
 		id,
 	)
 
-	return scanMailRow(row)
+	obj := scanMailRow(row)
+	if obj == nil {
+		return nil
+	}
+	if registerUpdate {
+		registerDirtyObject(
+			ctx,
+			obj,
+			func(ctx context.Context) error {
+				return o.Update(ctx, obj)
+			},
+		)
+	}
+
+	return obj
 }
 
 func (o mail) GetById(
@@ -265,6 +280,7 @@ func (o mail) GetById(
 	return o.getId(
 		ctx,
 		txFromCtx(ctx),
+		true,
 		id,
 	)
 }
@@ -276,6 +292,7 @@ func (o mail) SelectById(
 	return o.getId(
 		ctx,
 		querierFromCtx(ctx),
+		false,
 		id,
 	)
 }
@@ -283,6 +300,7 @@ func (o mail) SelectById(
 func (o mail) listUidConfId(
 	ctx context.Context,
 	q Querier,
+	registerUpdate bool,
 	uid int64, confId int32,
 ) []*Mail {
 	const query = "SELECT " + selectColumnsMail +
@@ -302,9 +320,19 @@ func (o mail) listUidConfId(
 	var result []*Mail
 
 	for rows.Next() {
+		obj := scanMailRows(rows)
+		if registerUpdate {
+			registerDirtyObject(
+				ctx,
+				obj,
+				func(ctx context.Context) error {
+					return o.Update(ctx, obj)
+				},
+			)
+		}
 		result = append(
 			result,
-			scanMailRows(rows),
+			obj,
 		)
 	}
 
@@ -322,6 +350,7 @@ func (o mail) ListByUidConfId(
 	return o.listUidConfId(
 		ctx,
 		txFromCtx(ctx),
+		true,
 		uid, confId,
 	)
 }
@@ -333,6 +362,7 @@ func (o mail) SelectListByUidConfId(
 	return o.listUidConfId(
 		ctx,
 		querierFromCtx(ctx),
+		false,
 		uid, confId,
 	)
 }
@@ -340,6 +370,7 @@ func (o mail) SelectListByUidConfId(
 func (o mail) getAll(
 	ctx context.Context,
 	q Querier,
+	registerUpdate bool,
 ) []*Mail {
 	const query = "SELECT " + selectColumnsMail +
 		" FROM user_mail"
@@ -356,9 +387,19 @@ func (o mail) getAll(
 	var result []*Mail
 
 	for rows.Next() {
+		obj := scanMailRows(rows)
+		if registerUpdate {
+			registerDirtyObject(
+				ctx,
+				obj,
+				func(ctx context.Context) error {
+					return o.Update(ctx, obj)
+				},
+			)
+		}
 		result = append(
 			result,
-			scanMailRows(rows),
+			obj,
 		)
 	}
 
@@ -375,6 +416,7 @@ func (o mail) GetAll(
 	return o.getAll(
 		ctx,
 		txFromCtx(ctx),
+		true,
 	)
 }
 
@@ -384,6 +426,7 @@ func (o mail) SelectAll(
 	return o.getAll(
 		ctx,
 		querierFromCtx(ctx),
+		false,
 	)
 }
 
@@ -591,4 +634,12 @@ func (o mail) Insert(
 	v.origAwardList = v.awardList
 
 	v.dirty = make(map[string]struct{})
+
+	registerDirtyObject(
+		ctx,
+		v,
+		func(ctx context.Context) error {
+			return o.Update(ctx, v)
+		},
+	)
 }

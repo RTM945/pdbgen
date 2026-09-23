@@ -193,6 +193,7 @@ func scanUserRows(
 func (o user) getId(
 	ctx context.Context,
 	q Querier,
+	registerUpdate bool,
 	id int64,
 ) *User {
 	const query = "SELECT " + selectColumnsUser +
@@ -205,7 +206,21 @@ func (o user) getId(
 		id,
 	)
 
-	return scanUserRow(row)
+	obj := scanUserRow(row)
+	if obj == nil {
+		return nil
+	}
+	if registerUpdate {
+		registerDirtyObject(
+			ctx,
+			obj,
+			func(ctx context.Context) error {
+				return o.Update(ctx, obj)
+			},
+		)
+	}
+
+	return obj
 }
 
 func (o user) GetById(
@@ -215,6 +230,7 @@ func (o user) GetById(
 	return o.getId(
 		ctx,
 		txFromCtx(ctx),
+		true,
 		id,
 	)
 }
@@ -226,6 +242,7 @@ func (o user) SelectById(
 	return o.getId(
 		ctx,
 		querierFromCtx(ctx),
+		false,
 		id,
 	)
 }
@@ -233,6 +250,7 @@ func (o user) SelectById(
 func (o user) getAll(
 	ctx context.Context,
 	q Querier,
+	registerUpdate bool,
 ) []*User {
 	const query = "SELECT " + selectColumnsUser +
 		" FROM user"
@@ -249,9 +267,19 @@ func (o user) getAll(
 	var result []*User
 
 	for rows.Next() {
+		obj := scanUserRows(rows)
+		if registerUpdate {
+			registerDirtyObject(
+				ctx,
+				obj,
+				func(ctx context.Context) error {
+					return o.Update(ctx, obj)
+				},
+			)
+		}
 		result = append(
 			result,
-			scanUserRows(rows),
+			obj,
 		)
 	}
 
@@ -268,6 +296,7 @@ func (o user) GetAll(
 	return o.getAll(
 		ctx,
 		txFromCtx(ctx),
+		true,
 	)
 }
 
@@ -277,6 +306,7 @@ func (o user) SelectAll(
 	return o.getAll(
 		ctx,
 		querierFromCtx(ctx),
+		false,
 	)
 }
 
@@ -444,4 +474,12 @@ func (o user) Insert(
 	v.origToken = v.token
 
 	v.dirty = make(map[string]struct{})
+
+	registerDirtyObject(
+		ctx,
+		v,
+		func(ctx context.Context) error {
+			return o.Update(ctx, v)
+		},
+	)
 }

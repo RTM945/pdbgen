@@ -46,7 +46,7 @@ func main() {
 		fmt.Printf("generated %s\n", output)
 	}
 
-	tpl, err := template.New("const").Parse(constTemplate)
+	tpl, err := template.New("context").Parse(constTemplate)
 	if err != nil {
 		panic(err)
 	}
@@ -67,7 +67,7 @@ func main() {
 		panic(err)
 	}
 
-	filename := "const.go"
+	filename := "context.go"
 	output := filepath.Join(schema.GenOutput, filename)
 
 	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {

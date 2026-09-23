@@ -12,6 +12,7 @@ import (
 
 type txKey struct{}
 type querierKey struct{}
+type unitOfWorkKey struct{}
 
 type DBTX interface {
 	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
@@ -23,6 +24,11 @@ type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
+
+type UnitOfWork interface {
+	Register(obj any, update func(context.Context) error)
+}
+
 func HasTx(ctx context.Context) bool {
 	return ctx.Value(txKey{}) != nil
 }
@@ -54,6 +60,22 @@ func WithTx(ctx context.Context, tx DBTX) context.Context {
 
 func WithQuerier(ctx context.Context, q Querier) context.Context {
 	return context.WithValue(ctx, querierKey{}, q)
+}
+
+func WithUnitOfWork(ctx context.Context, uow UnitOfWork) context.Context {
+	return context.WithValue(ctx, unitOfWorkKey{}, uow)
+}
+
+func registerDirtyObject(ctx context.Context, obj any, update func(context.Context) error) {
+	value := ctx.Value(unitOfWorkKey{})
+	if value == nil {
+		// 非事务查询，例如 GM/RPC SelectXXX。
+		return
+	}
+
+	uow := value.(UnitOfWork)
+
+	uow.Register(obj, update)
 }
 `
 
@@ -205,6 +227,7 @@ func scan{{ .TypeName }}Rows(
 func (o {{ $.ReceiverName }}) list{{ .Name }}(
 	ctx context.Context,
 	q Querier,
+	registerUpdate bool,
 	{{ .Params }},
 ) []*{{ $.TypeName }} {
 	const query =
@@ -225,9 +248,19 @@ func (o {{ $.ReceiverName }}) list{{ .Name }}(
 	var result []*{{ $.TypeName }}
 
 	for rows.Next() {
+		obj := scan{{ $.TypeName }}Rows(rows)
+		if registerUpdate {
+			registerDirtyObject(
+				ctx,
+				obj,
+				func(ctx context.Context) error {
+					return o.Update(ctx, obj)
+				},
+			)
+		}
 		result = append(
 			result,
-			scan{{ $.TypeName }}Rows(rows),
+			obj,
 		)
 	}
 
@@ -245,6 +278,7 @@ func (o {{ $.ReceiverName }}) ListBy{{ .Name }}(
 	return o.list{{ .Name }}(
 		ctx,
 		txFromCtx(ctx),
+		true,
 		{{ .Args }},
 	)
 }
@@ -256,6 +290,7 @@ func (o {{ $.ReceiverName }}) SelectListBy{{ .Name }}(
 	return o.list{{ .Name }}(
 		ctx,
 		querierFromCtx(ctx),
+		false,
 		{{ .Args }},
 	)
 }
@@ -265,6 +300,7 @@ func (o {{ $.ReceiverName }}) SelectListBy{{ .Name }}(
 func (o {{ $.ReceiverName }}) get{{ .Name }}(
 	ctx context.Context,
 	q Querier,
+	registerUpdate bool,
 	{{ .Params }},
 ) *{{ $.TypeName }} {
 	const query =
@@ -278,7 +314,22 @@ func (o {{ $.ReceiverName }}) get{{ .Name }}(
 		{{ .Args }},
 	)
 
-	return scan{{ $.TypeName }}Row(row)
+	obj := scan{{ $.TypeName }}Row(row)
+	if obj == nil {
+		return nil
+	}
+	if registerUpdate {
+		registerDirtyObject(
+			ctx,
+			obj,
+			func(ctx context.Context) error {
+				return o.Update(ctx, obj)
+			},
+		)
+	}
+	
+
+	return obj
 }
 
 func (o {{ $.ReceiverName }}) GetBy{{ .Name }}(
@@ -288,6 +339,7 @@ func (o {{ $.ReceiverName }}) GetBy{{ .Name }}(
 	return o.get{{ .Name }}(
 		ctx,
 		txFromCtx(ctx),
+		true,
 		{{ .Args }},
 	)
 }
@@ -299,6 +351,7 @@ func (o {{ $.ReceiverName }}) SelectBy{{ .Name }}(
 	return o.get{{ .Name }}(
 		ctx,
 		querierFromCtx(ctx),
+		false,
 		{{ .Args }},
 	)
 }
@@ -309,6 +362,7 @@ func (o {{ $.ReceiverName }}) SelectBy{{ .Name }}(
 func (o {{ .ReceiverName }}) getAll(
 	ctx context.Context,
 	q Querier,
+	registerUpdate bool,
 ) []*{{ .TypeName }} {
 	const query =
 		"SELECT " + selectColumns{{ .TypeName }} +
@@ -326,9 +380,19 @@ func (o {{ .ReceiverName }}) getAll(
 	var result []*{{ .TypeName }}
 
 	for rows.Next() {
+		obj := scan{{ .TypeName }}Rows(rows)
+		if registerUpdate {
+			registerDirtyObject(
+				ctx,
+				obj,
+				func(ctx context.Context) error {
+					return o.Update(ctx, obj)
+				},
+			)
+		}
 		result = append(
 			result,
-			scan{{ .TypeName }}Rows(rows),
+			obj,
 		)
 	}
 
@@ -345,6 +409,7 @@ func (o {{ .ReceiverName }}) GetAll(
 	return o.getAll(
 		ctx,
 		txFromCtx(ctx),
+		true,
 	)
 }
 
@@ -354,6 +419,7 @@ func (o {{ .ReceiverName }}) SelectAll(
 	return o.getAll(
 		ctx,
 		querierFromCtx(ctx),
+		false,
 	)
 }
 
@@ -486,5 +552,13 @@ func (o {{ .ReceiverName }}) Insert(
 {{ end }}
 
 	v.dirty = make(map[string]struct{})
+
+	registerDirtyObject(
+		ctx,
+		v,
+		func(ctx context.Context) error {
+			return o.Update(ctx, v)
+		},
+	)
 }
 `

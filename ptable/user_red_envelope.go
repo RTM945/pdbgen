@@ -218,6 +218,7 @@ func scanRedEnvelopeRows(
 func (o redEnvelope) getId(
 	ctx context.Context,
 	q Querier,
+	registerUpdate bool,
 	id int64,
 ) *RedEnvelope {
 	const query = "SELECT " + selectColumnsRedEnvelope +
@@ -230,7 +231,21 @@ func (o redEnvelope) getId(
 		id,
 	)
 
-	return scanRedEnvelopeRow(row)
+	obj := scanRedEnvelopeRow(row)
+	if obj == nil {
+		return nil
+	}
+	if registerUpdate {
+		registerDirtyObject(
+			ctx,
+			obj,
+			func(ctx context.Context) error {
+				return o.Update(ctx, obj)
+			},
+		)
+	}
+
+	return obj
 }
 
 func (o redEnvelope) GetById(
@@ -240,6 +255,7 @@ func (o redEnvelope) GetById(
 	return o.getId(
 		ctx,
 		txFromCtx(ctx),
+		true,
 		id,
 	)
 }
@@ -251,6 +267,7 @@ func (o redEnvelope) SelectById(
 	return o.getId(
 		ctx,
 		querierFromCtx(ctx),
+		false,
 		id,
 	)
 }
@@ -258,6 +275,7 @@ func (o redEnvelope) SelectById(
 func (o redEnvelope) getUidActId(
 	ctx context.Context,
 	q Querier,
+	registerUpdate bool,
 	uid int64, actId int32,
 ) *RedEnvelope {
 	const query = "SELECT " + selectColumnsRedEnvelope +
@@ -270,7 +288,21 @@ func (o redEnvelope) getUidActId(
 		uid, actId,
 	)
 
-	return scanRedEnvelopeRow(row)
+	obj := scanRedEnvelopeRow(row)
+	if obj == nil {
+		return nil
+	}
+	if registerUpdate {
+		registerDirtyObject(
+			ctx,
+			obj,
+			func(ctx context.Context) error {
+				return o.Update(ctx, obj)
+			},
+		)
+	}
+
+	return obj
 }
 
 func (o redEnvelope) GetByUidActId(
@@ -280,6 +312,7 @@ func (o redEnvelope) GetByUidActId(
 	return o.getUidActId(
 		ctx,
 		txFromCtx(ctx),
+		true,
 		uid, actId,
 	)
 }
@@ -291,6 +324,7 @@ func (o redEnvelope) SelectByUidActId(
 	return o.getUidActId(
 		ctx,
 		querierFromCtx(ctx),
+		false,
 		uid, actId,
 	)
 }
@@ -298,6 +332,7 @@ func (o redEnvelope) SelectByUidActId(
 func (o redEnvelope) getAll(
 	ctx context.Context,
 	q Querier,
+	registerUpdate bool,
 ) []*RedEnvelope {
 	const query = "SELECT " + selectColumnsRedEnvelope +
 		" FROM user_red_envelope"
@@ -314,9 +349,19 @@ func (o redEnvelope) getAll(
 	var result []*RedEnvelope
 
 	for rows.Next() {
+		obj := scanRedEnvelopeRows(rows)
+		if registerUpdate {
+			registerDirtyObject(
+				ctx,
+				obj,
+				func(ctx context.Context) error {
+					return o.Update(ctx, obj)
+				},
+			)
+		}
 		result = append(
 			result,
-			scanRedEnvelopeRows(rows),
+			obj,
 		)
 	}
 
@@ -333,6 +378,7 @@ func (o redEnvelope) GetAll(
 	return o.getAll(
 		ctx,
 		txFromCtx(ctx),
+		true,
 	)
 }
 
@@ -342,6 +388,7 @@ func (o redEnvelope) SelectAll(
 	return o.getAll(
 		ctx,
 		querierFromCtx(ctx),
+		false,
 	)
 }
 
@@ -529,4 +576,12 @@ func (o redEnvelope) Insert(
 	v.origTotal = v.total
 
 	v.dirty = make(map[string]struct{})
+
+	registerDirtyObject(
+		ctx,
+		v,
+		func(ctx context.Context) error {
+			return o.Update(ctx, v)
+		},
+	)
 }

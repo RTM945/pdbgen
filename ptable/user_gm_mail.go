@@ -268,6 +268,7 @@ func scanGMMailRows(
 func (o gMMail) getId(
 	ctx context.Context,
 	q Querier,
+	registerUpdate bool,
 	id int64,
 ) *GMMail {
 	const query = "SELECT " + selectColumnsGMMail +
@@ -280,7 +281,21 @@ func (o gMMail) getId(
 		id,
 	)
 
-	return scanGMMailRow(row)
+	obj := scanGMMailRow(row)
+	if obj == nil {
+		return nil
+	}
+	if registerUpdate {
+		registerDirtyObject(
+			ctx,
+			obj,
+			func(ctx context.Context) error {
+				return o.Update(ctx, obj)
+			},
+		)
+	}
+
+	return obj
 }
 
 func (o gMMail) GetById(
@@ -290,6 +305,7 @@ func (o gMMail) GetById(
 	return o.getId(
 		ctx,
 		txFromCtx(ctx),
+		true,
 		id,
 	)
 }
@@ -301,6 +317,7 @@ func (o gMMail) SelectById(
 	return o.getId(
 		ctx,
 		querierFromCtx(ctx),
+		false,
 		id,
 	)
 }
@@ -308,6 +325,7 @@ func (o gMMail) SelectById(
 func (o gMMail) getAll(
 	ctx context.Context,
 	q Querier,
+	registerUpdate bool,
 ) []*GMMail {
 	const query = "SELECT " + selectColumnsGMMail +
 		" FROM user_gm_mail"
@@ -324,9 +342,19 @@ func (o gMMail) getAll(
 	var result []*GMMail
 
 	for rows.Next() {
+		obj := scanGMMailRows(rows)
+		if registerUpdate {
+			registerDirtyObject(
+				ctx,
+				obj,
+				func(ctx context.Context) error {
+					return o.Update(ctx, obj)
+				},
+			)
+		}
 		result = append(
 			result,
-			scanGMMailRows(rows),
+			obj,
 		)
 	}
 
@@ -343,6 +371,7 @@ func (o gMMail) GetAll(
 	return o.getAll(
 		ctx,
 		txFromCtx(ctx),
+		true,
 	)
 }
 
@@ -352,6 +381,7 @@ func (o gMMail) SelectAll(
 	return o.getAll(
 		ctx,
 		querierFromCtx(ctx),
+		false,
 	)
 }
 
@@ -579,4 +609,12 @@ func (o gMMail) Insert(
 	v.origCondition = v.condition
 
 	v.dirty = make(map[string]struct{})
+
+	registerDirtyObject(
+		ctx,
+		v,
+		func(ctx context.Context) error {
+			return o.Update(ctx, v)
+		},
+	)
 }
