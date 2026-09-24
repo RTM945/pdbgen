@@ -7,7 +7,6 @@ import (
 	"log"
 	"pdbgen/dbctx"
 	"pdbgen/readxml"
-	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -26,6 +25,7 @@ var (
 
 type logger interface {
 	Println(v ...any)
+	Printf(format string, v ...any)
 }
 
 var ErrAdvisoryLockNotAcquired = errors.New("advisory lock not acquired")
@@ -57,35 +57,12 @@ func Init(ctx context.Context, pdb *readxml.Schema) error {
 	return nil
 }
 
-func setLocalTimeout(ctx context.Context, tx dbctx.DB) error {
-	if statementTimeoutMs > 0 {
-		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = "+strconv.Itoa(statementTimeoutMs)); err != nil {
-			return fmt.Errorf("set statement_timeout: %w", err)
-		}
-	}
-
-	if idleInTransactionSessionTimeoutMs > 0 {
-		if _, err := tx.Exec(ctx, "SET LOCAL idle_in_transaction_session_timeout = "+strconv.Itoa(idleInTransactionSessionTimeoutMs)); err != nil {
-			return fmt.Errorf("set idle_in_transaction_session_timeout: %w", err)
-		}
-	}
-
-	if lockTimeoutMs > 0 {
-		if _, err := tx.Exec(ctx, "SET LOCAL lock_timeout = "+strconv.Itoa(lockTimeoutMs)); err != nil {
-			return fmt.Errorf("set lock_timeout: %w", err)
-		}
-	}
-
-	return nil
-}
-
-func Query[T any](ctx context.Context, fn func(context.Context) (T, error)) (T, error) {
+func Query(ctx context.Context, fn func(context.Context) error) error {
 	// 不允许在事务中调用 Query。
 	// 否则容易出现事务里已经修改数据，但 Query 却从
 	// pool 的另一条 PostgreSQL connection 读取的问题。
 	if dbctx.HasTx(ctx) {
-		var zero T
-		return zero, errors.New("dbpool.Query cannot be called inside transaction")
+		return errors.New("dbpool.Query cannot be called inside transaction")
 	}
 
 	ctx = dbctx.WithQuerier(ctx, wrapLogger(dbpool))
@@ -93,11 +70,12 @@ func Query[T any](ctx context.Context, fn func(context.Context) (T, error)) (T, 
 	return fn(ctx)
 }
 
-func WithTx(ctx context.Context, fn func(context.Context) error) error {
-	return withTx(ctx, nil, fn)
-}
+// 只要开事务必加咨询锁
+//func WithTx(ctx context.Context, fn func(context.Context) error) error {
+//	return withTx(ctx, nil, fn)
+//}
 
-func withTx(ctx context.Context, prepare func(context.Context, dbctx.DB) error, fn func(context.Context) error) (err error) {
+func withTx(ctx context.Context, prepare func(context.Context, pgx.Tx) error, fn func(context.Context) error) (err error) {
 	tx, err := dbpool.Begin(ctx)
 	if err != nil {
 		return err
@@ -132,12 +110,8 @@ func withTx(ctx context.Context, prepare func(context.Context, dbctx.DB) error, 
 		}
 	}()
 
-	if err = setLocalTimeout(ctx, db); err != nil {
-		return err
-	}
-
 	if prepare != nil {
-		if err = prepare(ctx, db); err != nil {
+		if err = prepare(ctx, tx); err != nil {
 			return err
 		}
 	}
@@ -147,40 +121,86 @@ func withTx(ctx context.Context, prepare func(context.Context, dbctx.DB) error, 
 
 // WithTryAdvisoryLock 拿不到锁时会直接返回
 func WithTryAdvisoryLock(ctx context.Context, lockKey string, lockValue int64, fn func(context.Context) error) error {
-	return withAdvisoryLock(ctx, lockKey, lockValue, true, fn)
+	return withTx(
+		ctx,
+		func(ctx context.Context, tx pgx.Tx) error {
+			return prepare(ctx, tx, true, lockKey, lockValue)
+		},
+		fn,
+	)
 }
 
 // WithAdvisoryLock 拿不到锁时会阻塞
 func WithAdvisoryLock(ctx context.Context, lockKey string, lockValue int64, fn func(context.Context) error) error {
-	return withAdvisoryLock(ctx, lockKey, lockValue, false, fn)
+	return withTx(
+		ctx,
+		func(ctx context.Context, tx pgx.Tx) error {
+			return prepare(ctx, tx, false, lockKey, lockValue)
+		},
+		fn,
+	)
 }
 
-func withAdvisoryLock(ctx context.Context, lockKey string, lockValue int64, tryLock bool, fn func(context.Context) error) (err error) {
-	var prepare func(ctx context.Context, tx dbctx.DB) error
+func prepare(ctx context.Context, tx pgx.Tx, tryLock bool, lockKey string, lockValue int64) error {
+	batch := &pgx.Batch{}
 
-	if tryLock {
-		prepare = func(ctx context.Context, tx dbctx.DB) error {
-			var locked bool
-
-			err := tx.QueryRow(ctx, "SELECT pg_try_advisory_xact_lock(hashtext($1), $2)", lockKey, lockValue).Scan(&locked)
-			if err != nil {
-				panic(err)
-			}
-
-			if !locked {
-				return ErrAdvisoryLockNotAcquired
-			}
-			return nil
-		}
-	} else {
-		prepare = func(ctx context.Context, tx dbctx.DB) error {
-			_, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1), $2", lockKey, lockValue)
-			if err != nil {
-				panic(err)
-			}
-			return nil
-		}
+	if statementTimeoutMs > 0 {
+		batch.Queue(fmt.Sprintf("SET LOCAL statement_timeout = %d", statementTimeoutMs))
 	}
 
-	return withTx(ctx, prepare, fn)
+	if idleInTransactionSessionTimeoutMs > 0 {
+		batch.Queue(fmt.Sprintf("SET LOCAL idle_in_transaction_session_timeout = %d", idleInTransactionSessionTimeoutMs))
+	}
+
+	if lockTimeoutMs > 0 {
+		batch.Queue(fmt.Sprintf("SET LOCAL lock_timeout = %d", lockTimeoutMs))
+	}
+
+	if tryLock {
+		batch.Queue("SELECT pg_try_advisory_xact_lock(hashtext($1), $2)", lockKey, lockValue)
+	} else {
+		batch.Queue("SELECT pg_advisory_xact_lock(hashtext($1), $2)", lockKey, lockValue)
+	}
+
+	if batch.Len() == 0 {
+		return nil
+	}
+
+	start := time.Now()
+
+	br := tx.SendBatch(ctx, batch)
+
+	var err error
+	for i := 0; i < batch.Len()-1; i++ {
+		if _, err = br.Exec(); err != nil {
+			break
+		}
+	}
+	if err == nil {
+		if tryLock {
+			var locked bool
+
+			err = br.QueryRow().Scan(&locked)
+
+			if err == nil && !locked {
+				err = ErrAdvisoryLockNotAcquired
+			}
+		} else {
+			var rows pgx.Rows
+
+			rows, err = br.Query()
+			if err == nil {
+				err = rows.Err()
+				rows.Close()
+			}
+		}
+	}
+	closeErr := br.Close()
+	if err == nil {
+		err = closeErr
+	}
+
+	logBatch(start, batch, err)
+
+	return err
 }
