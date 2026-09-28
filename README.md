@@ -153,8 +153,12 @@ func (this *RedEnvelope) Receive(session *Session) {
 ```
 
 # todo 
-<del>目前只能读写一行，需要多行的代码生成和业务逻辑支持</del> 
-对于ResetToLoaded，因为在一次请求中可能涉及到多个表的改变，可能需要在ctx中记log，要回滚时log中的对象按顺序全部回滚
+<del>目前只能读写一行，需要多行的代码生成和业务逻辑支持</del>  
+
+对于ResetToLoaded，因为在一次请求中可能涉及到多个表的改变，可能需要在ctx中记log，要回滚时log中的对象按顺序全部回滚  
+
+咨询锁的函数签名是单bigint和两个int，hashtext('user', uid)是用两个int拼起来的，在uid超过int范围时就会出错。预想修改成默认的user锁直接用uid，而其他业务锁用代码生成枚举值。
+
 
 #pg
 ```
