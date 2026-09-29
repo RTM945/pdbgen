@@ -6,9 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/bits"
+	"strconv"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"pdbgen/dbctx"
 )
 
@@ -16,16 +17,25 @@ var UserGmMailTable gMMail
 
 type gMMail struct{}
 
-type GMMail struct {
-	id            int64
-	params        string
-	awardList     string
-	startAt       int64
-	endAt         int64
-	channel       string
-	userCreatedAt int64
-	condition     string
+const (
+	dirtyGMMailParams        uint64 = 1 << 0
+	dirtyGMMailAwardList     uint64 = 1 << 1
+	dirtyGMMailStartAt       uint64 = 1 << 2
+	dirtyGMMailEndAt         uint64 = 1 << 3
+	dirtyGMMailChannel       uint64 = 1 << 4
+	dirtyGMMailUserCreatedAt uint64 = 1 << 5
+	dirtyGMMailCondition     uint64 = 1 << 6
+)
 
+type GMMail struct {
+	id                int64
+	params            string
+	awardList         string
+	startAt           int64
+	endAt             int64
+	channel           string
+	userCreatedAt     int64
+	condition         string
 	loaded            bool
 	origParams        string
 	origAwardList     string
@@ -34,14 +44,11 @@ type GMMail struct {
 	origChannel       string
 	origUserCreatedAt int64
 	origCondition     string
-
-	dirty map[string]struct{}
+	dirty             uint64
 }
 
 func NewGMMail() *GMMail {
-	return &GMMail{
-		dirty: make(map[string]struct{}),
-	}
+	return &GMMail{}
 }
 
 func loadedGMMail(
@@ -71,99 +78,84 @@ func loadedGMMail(
 		origChannel:       channel,
 		origUserCreatedAt: userCreatedAt,
 		origCondition:     condition,
-		dirty:             make(map[string]struct{}),
 	}
 }
 
 func (o *GMMail) Id() int64 {
 	return o.id
 }
-
 func (o *GMMail) SetParams(v string) {
 	if o.params == v {
 		return
 	}
-
 	o.params = v
-	o.dirty["params"] = struct{}{}
+	o.dirty |= dirtyGMMailParams
 }
 
 func (o *GMMail) Params() string {
 	return o.params
 }
-
 func (o *GMMail) SetAwardList(v string) {
 	if o.awardList == v {
 		return
 	}
-
 	o.awardList = v
-	o.dirty["award_list"] = struct{}{}
+	o.dirty |= dirtyGMMailAwardList
 }
 
 func (o *GMMail) AwardList() string {
 	return o.awardList
 }
-
 func (o *GMMail) SetStartAt(v int64) {
 	if o.startAt == v {
 		return
 	}
-
 	o.startAt = v
-	o.dirty["start_at"] = struct{}{}
+	o.dirty |= dirtyGMMailStartAt
 }
 
 func (o *GMMail) StartAt() int64 {
 	return o.startAt
 }
-
 func (o *GMMail) SetEndAt(v int64) {
 	if o.endAt == v {
 		return
 	}
-
 	o.endAt = v
-	o.dirty["end_at"] = struct{}{}
+	o.dirty |= dirtyGMMailEndAt
 }
 
 func (o *GMMail) EndAt() int64 {
 	return o.endAt
 }
-
 func (o *GMMail) SetChannel(v string) {
 	if o.channel == v {
 		return
 	}
-
 	o.channel = v
-	o.dirty["channel"] = struct{}{}
+	o.dirty |= dirtyGMMailChannel
 }
 
 func (o *GMMail) Channel() string {
 	return o.channel
 }
-
 func (o *GMMail) SetUserCreatedAt(v int64) {
 	if o.userCreatedAt == v {
 		return
 	}
-
 	o.userCreatedAt = v
-	o.dirty["user_created_at"] = struct{}{}
+	o.dirty |= dirtyGMMailUserCreatedAt
 }
 
 func (o *GMMail) UserCreatedAt() int64 {
 	return o.userCreatedAt
 }
-
 func (o *GMMail) SetCondition(v string) {
 	if o.condition == v {
 		return
 	}
-
 	o.condition = v
-	o.dirty["condition"] = struct{}{}
+	o.dirty |= dirtyGMMailCondition
 }
 
 func (o *GMMail) Condition() string {
@@ -178,15 +170,12 @@ func (o *GMMail) ResetToLoaded() {
 	o.channel = o.origChannel
 	o.userCreatedAt = o.origUserCreatedAt
 	o.condition = o.origCondition
-
-	o.dirty = make(map[string]struct{})
+	o.dirty = 0
 }
 
 const selectColumnsGMMail = "id, params, award_list, start_at, end_at, channel, user_created_at, condition"
 
-func scanGMMailRow(
-	row pgx.Row,
-) *GMMail {
+func scanGMMail(s dbctx.Scanner) (*GMMail, error) {
 	var (
 		id            int64
 		params        string
@@ -197,8 +186,7 @@ func scanGMMailRow(
 		userCreatedAt int64
 		condition     string
 	)
-
-	if err := row.Scan(
+	if err := s.Scan(
 		&id,
 		&params,
 		&awardList,
@@ -208,13 +196,8 @@ func scanGMMailRow(
 		&userCreatedAt,
 		&condition,
 	); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-
-		panic(err)
+		return nil, err
 	}
-
 	return loadedGMMail(
 		id,
 		params,
@@ -224,79 +207,18 @@ func scanGMMailRow(
 		channel,
 		userCreatedAt,
 		condition,
-	)
-}
-
-func scanGMMailRows(
-	rows pgx.Rows,
-) *GMMail {
-	var (
-		id            int64
-		params        string
-		awardList     string
-		startAt       int64
-		endAt         int64
-		channel       string
-		userCreatedAt int64
-		condition     string
-	)
-
-	if err := rows.Scan(
-		&id,
-		&params,
-		&awardList,
-		&startAt,
-		&endAt,
-		&channel,
-		&userCreatedAt,
-		&condition,
-	); err != nil {
-		panic(err)
-	}
-
-	return loadedGMMail(
-		id,
-		params,
-		awardList,
-		startAt,
-		endAt,
-		channel,
-		userCreatedAt,
-		condition,
-	)
+	), nil
 }
 
 func (o gMMail) getId(
 	ctx context.Context,
 	q dbctx.Querier,
-	registerUpdate bool,
 	id int64,
 ) *GMMail {
 	const query = "SELECT " + selectColumnsGMMail +
 		" FROM user_gm_mail" +
 		" WHERE id = $1"
-
-	row := q.QueryRow(
-		ctx,
-		query,
-		id,
-	)
-
-	obj := scanGMMailRow(row)
-	if obj == nil {
-		return nil
-	}
-	if registerUpdate {
-		dbctx.RegisterDirtyObject(
-			ctx,
-			obj,
-			func(ctx context.Context) error {
-				return o.Update(ctx, obj)
-			},
-		)
-	}
-
-	return obj
+	return dbctx.QueryOne(ctx, q, query, scanGMMail, id)
 }
 
 func (o gMMail) GetById(
@@ -306,7 +228,6 @@ func (o gMMail) GetById(
 	return o.getId(
 		ctx,
 		dbctx.TxFromCtx(ctx),
-		true,
 		id,
 	)
 }
@@ -318,7 +239,6 @@ func (o gMMail) SelectById(
 	return o.getId(
 		ctx,
 		dbctx.QuerierFromCtx(ctx),
-		false,
 		id,
 	)
 }
@@ -326,242 +246,131 @@ func (o gMMail) SelectById(
 func (o gMMail) getAll(
 	ctx context.Context,
 	q dbctx.Querier,
-	registerUpdate bool,
 ) []*GMMail {
 	const query = "SELECT " + selectColumnsGMMail +
 		" FROM user_gm_mail"
-
-	rows, err := q.Query(
-		ctx,
-		query,
-	)
-	if err != nil {
-		panic(err)
-	}
-	defer rows.Close()
-
-	var result []*GMMail
-
-	for rows.Next() {
-		obj := scanGMMailRows(rows)
-		if registerUpdate {
-			dbctx.RegisterDirtyObject(
-				ctx,
-				obj,
-				func(ctx context.Context) error {
-					return o.Update(ctx, obj)
-				},
-			)
-		}
-		result = append(
-			result,
-			obj,
-		)
-	}
-
-	if err := rows.Err(); err != nil {
-		panic(err)
-	}
-
-	return result
+	return dbctx.QueryList(ctx, q, query, scanGMMail)
 }
 
 func (o gMMail) GetAll(
 	ctx context.Context,
 ) []*GMMail {
-	return o.getAll(
-		ctx,
-		dbctx.TxFromCtx(ctx),
-		true,
-	)
+	return o.getAll(ctx, dbctx.TxFromCtx(ctx))
 }
 
 func (o gMMail) SelectAll(
 	ctx context.Context,
 ) []*GMMail {
-	return o.getAll(
-		ctx,
-		dbctx.QuerierFromCtx(ctx),
-		false,
-	)
+	return o.getAll(ctx, dbctx.QuerierFromCtx(ctx))
 }
 
 var ErrGMMailNotFound = errors.New(
 	"user_gm_mail: row not found at update time",
 )
 
+// FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
+// UnitOfWork 据此跳过这一行，不占用一次往返。
+func (v *GMMail) FlushStmt() (string, []any) {
+	if !v.loaded || v.dirty == 0 {
+		return "", nil
+	}
+	var sb strings.Builder
+	args := make([]any, 0, bits.OnesCount64(v.dirty)+1)
+	sb.WriteString("UPDATE user_gm_mail SET ")
+	if v.dirty&dirtyGMMailParams != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.params)
+		sb.WriteString("params = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyGMMailAwardList != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.awardList)
+		sb.WriteString("award_list = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyGMMailStartAt != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.startAt)
+		sb.WriteString("start_at = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyGMMailEndAt != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.endAt)
+		sb.WriteString("end_at = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyGMMailChannel != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.channel)
+		sb.WriteString("channel = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyGMMailUserCreatedAt != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.userCreatedAt)
+		sb.WriteString("user_created_at = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyGMMailCondition != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.condition)
+		sb.WriteString("condition = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	args = append(args, v.id)
+	sb.WriteString(" WHERE id = $")
+	sb.WriteString(strconv.Itoa(len(args)))
+	return sb.String(), args
+}
+
+// FlushDone 实现 dbctx.Flusher，在对应 UPDATE 执行成功后回调，
+// 同步 orig 快照并清空 dirty；rows == 0 说明这一行已被删除或从未存在。
+func (v *GMMail) FlushDone(rows int64) error {
+	if rows == 0 {
+		return ErrGMMailNotFound
+	}
+	v.origParams = v.params
+	v.origAwardList = v.awardList
+	v.origStartAt = v.startAt
+	v.origEndAt = v.endAt
+	v.origChannel = v.channel
+	v.origUserCreatedAt = v.userCreatedAt
+	v.origCondition = v.condition
+	v.dirty = 0
+	return nil
+}
+
+// Update 是不经过 UnitOfWork 的直接落库入口，
+// 生成代码内部不再调用它，仅供业务代码需要立即写库时使用。
 func (o gMMail) Update(
 	ctx context.Context,
 	v *GMMail,
 ) error {
-	tx := dbctx.TxFromCtx(ctx)
-
-	if !v.loaded {
-		return errors.New(
-			"update GMMail must load first",
-		)
-	}
-
-	if len(v.dirty) == 0 {
+	query, args := v.FlushStmt()
+	if query == "" {
 		return nil
 	}
-
-	var sets []string
-	var args []any
-
-	n := 0
-
-	next := func() int {
-		n++
-		return n
-	}
-
-	if _, ok := v.dirty["params"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"params = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.params,
-		)
-	}
-
-	if _, ok := v.dirty["award_list"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"award_list = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.awardList,
-		)
-	}
-
-	if _, ok := v.dirty["start_at"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"start_at = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.startAt,
-		)
-	}
-
-	if _, ok := v.dirty["end_at"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"end_at = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.endAt,
-		)
-	}
-
-	if _, ok := v.dirty["channel"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"channel = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.channel,
-		)
-	}
-
-	if _, ok := v.dirty["user_created_at"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"user_created_at = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.userCreatedAt,
-		)
-	}
-
-	if _, ok := v.dirty["condition"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"condition = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.condition,
-		)
-	}
-
-	args = append(
-		args,
-		v.id,
-	)
-
-	query := fmt.Sprintf(
-		"UPDATE user_gm_mail SET %s WHERE id = $%d",
-		strings.Join(sets, ", "),
-		n+1,
-	)
-
-	tag, err := tx.Exec(
-		ctx,
-		query,
-		args...,
-	)
+	tag, err := dbctx.TxFromCtx(ctx).Exec(ctx, query, args...)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("user_gm_mail update: %w", err)
 	}
-
-	if tag.RowsAffected() == 0 {
-		return ErrGMMailNotFound
-	}
-
-	v.origParams = v.params
-
-	v.origAwardList = v.awardList
-
-	v.origStartAt = v.startAt
-
-	v.origEndAt = v.endAt
-
-	v.origChannel = v.channel
-
-	v.origUserCreatedAt = v.userCreatedAt
-
-	v.origCondition = v.condition
-
-	v.dirty = make(map[string]struct{})
-
-	return nil
+	return v.FlushDone(tag.RowsAffected())
 }
 
 func (o gMMail) Insert(
@@ -569,7 +378,6 @@ func (o gMMail) Insert(
 	v *GMMail,
 ) {
 	tx := dbctx.TxFromCtx(ctx)
-
 	const query = "INSERT INTO user_gm_mail " +
 		"(params, award_list, start_at, end_at, channel, user_created_at, condition) " +
 		"VALUES ($1, $2, $3, $4, $5, $6, $7)" +
@@ -586,7 +394,6 @@ func (o gMMail) Insert(
 		v.userCreatedAt,
 		v.condition,
 	)
-
 	if err := row.Scan(
 		&v.id,
 	); err != nil {
@@ -609,13 +416,6 @@ func (o gMMail) Insert(
 
 	v.origCondition = v.condition
 
-	v.dirty = make(map[string]struct{})
-
-	dbctx.RegisterDirtyObject(
-		ctx,
-		v,
-		func(ctx context.Context) error {
-			return o.Update(ctx, v)
-		},
-	)
+	v.dirty = 0
+	dbctx.Track(ctx, v)
 }

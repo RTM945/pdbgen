@@ -6,9 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/bits"
+	"strconv"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"pdbgen/dbctx"
 )
 
@@ -16,15 +17,23 @@ var UserMailTable mail
 
 type mail struct{}
 
-type Mail struct {
-	id        int64
-	uid       int64
-	confId    int32
-	state     int32
-	receiveAt int64
-	params    string
-	awardList string
+const (
+	dirtyMailUid       uint64 = 1 << 0
+	dirtyMailConfId    uint64 = 1 << 1
+	dirtyMailState     uint64 = 1 << 2
+	dirtyMailReceiveAt uint64 = 1 << 3
+	dirtyMailParams    uint64 = 1 << 4
+	dirtyMailAwardList uint64 = 1 << 5
+)
 
+type Mail struct {
+	id            int64
+	uid           int64
+	confId        int32
+	state         int32
+	receiveAt     int64
+	params        string
+	awardList     string
 	loaded        bool
 	origUid       int64
 	origConfId    int32
@@ -32,14 +41,11 @@ type Mail struct {
 	origReceiveAt int64
 	origParams    string
 	origAwardList string
-
-	dirty map[string]struct{}
+	dirty         uint64
 }
 
 func NewMail() *Mail {
-	return &Mail{
-		dirty: make(map[string]struct{}),
-	}
+	return &Mail{}
 }
 
 func loadedMail(
@@ -66,86 +72,73 @@ func loadedMail(
 		origReceiveAt: receiveAt,
 		origParams:    params,
 		origAwardList: awardList,
-		dirty:         make(map[string]struct{}),
 	}
 }
 
 func (o *Mail) Id() int64 {
 	return o.id
 }
-
 func (o *Mail) SetUid(v int64) {
 	if o.uid == v {
 		return
 	}
-
 	o.uid = v
-	o.dirty["uid"] = struct{}{}
+	o.dirty |= dirtyMailUid
 }
 
 func (o *Mail) Uid() int64 {
 	return o.uid
 }
-
 func (o *Mail) SetConfId(v int32) {
 	if o.confId == v {
 		return
 	}
-
 	o.confId = v
-	o.dirty["conf_id"] = struct{}{}
+	o.dirty |= dirtyMailConfId
 }
 
 func (o *Mail) ConfId() int32 {
 	return o.confId
 }
-
 func (o *Mail) SetState(v int32) {
 	if o.state == v {
 		return
 	}
-
 	o.state = v
-	o.dirty["state"] = struct{}{}
+	o.dirty |= dirtyMailState
 }
 
 func (o *Mail) State() int32 {
 	return o.state
 }
-
 func (o *Mail) SetReceiveAt(v int64) {
 	if o.receiveAt == v {
 		return
 	}
-
 	o.receiveAt = v
-	o.dirty["receive_at"] = struct{}{}
+	o.dirty |= dirtyMailReceiveAt
 }
 
 func (o *Mail) ReceiveAt() int64 {
 	return o.receiveAt
 }
-
 func (o *Mail) SetParams(v string) {
 	if o.params == v {
 		return
 	}
-
 	o.params = v
-	o.dirty["params"] = struct{}{}
+	o.dirty |= dirtyMailParams
 }
 
 func (o *Mail) Params() string {
 	return o.params
 }
-
 func (o *Mail) SetAwardList(v string) {
 	if o.awardList == v {
 		return
 	}
-
 	o.awardList = v
-	o.dirty["award_list"] = struct{}{}
+	o.dirty |= dirtyMailAwardList
 }
 
 func (o *Mail) AwardList() string {
@@ -159,15 +152,12 @@ func (o *Mail) ResetToLoaded() {
 	o.receiveAt = o.origReceiveAt
 	o.params = o.origParams
 	o.awardList = o.origAwardList
-
-	o.dirty = make(map[string]struct{})
+	o.dirty = 0
 }
 
 const selectColumnsMail = "id, uid, conf_id, state, receive_at, params, award_list"
 
-func scanMailRow(
-	row pgx.Row,
-) *Mail {
+func scanMail(s dbctx.Scanner) (*Mail, error) {
 	var (
 		id        int64
 		uid       int64
@@ -177,8 +167,7 @@ func scanMailRow(
 		params    string
 		awardList string
 	)
-
-	if err := row.Scan(
+	if err := s.Scan(
 		&id,
 		&uid,
 		&confId,
@@ -187,13 +176,8 @@ func scanMailRow(
 		&params,
 		&awardList,
 	); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-
-		panic(err)
+		return nil, err
 	}
-
 	return loadedMail(
 		id,
 		uid,
@@ -202,76 +186,18 @@ func scanMailRow(
 		receiveAt,
 		params,
 		awardList,
-	)
-}
-
-func scanMailRows(
-	rows pgx.Rows,
-) *Mail {
-	var (
-		id        int64
-		uid       int64
-		confId    int32
-		state     int32
-		receiveAt int64
-		params    string
-		awardList string
-	)
-
-	if err := rows.Scan(
-		&id,
-		&uid,
-		&confId,
-		&state,
-		&receiveAt,
-		&params,
-		&awardList,
-	); err != nil {
-		panic(err)
-	}
-
-	return loadedMail(
-		id,
-		uid,
-		confId,
-		state,
-		receiveAt,
-		params,
-		awardList,
-	)
+	), nil
 }
 
 func (o mail) getId(
 	ctx context.Context,
 	q dbctx.Querier,
-	registerUpdate bool,
 	id int64,
 ) *Mail {
 	const query = "SELECT " + selectColumnsMail +
 		" FROM user_mail" +
 		" WHERE id = $1"
-
-	row := q.QueryRow(
-		ctx,
-		query,
-		id,
-	)
-
-	obj := scanMailRow(row)
-	if obj == nil {
-		return nil
-	}
-	if registerUpdate {
-		dbctx.RegisterDirtyObject(
-			ctx,
-			obj,
-			func(ctx context.Context) error {
-				return o.Update(ctx, obj)
-			},
-		)
-	}
-
-	return obj
+	return dbctx.QueryOne(ctx, q, query, scanMail, id)
 }
 
 func (o mail) GetById(
@@ -281,7 +207,6 @@ func (o mail) GetById(
 	return o.getId(
 		ctx,
 		dbctx.TxFromCtx(ctx),
-		true,
 		id,
 	)
 }
@@ -293,7 +218,6 @@ func (o mail) SelectById(
 	return o.getId(
 		ctx,
 		dbctx.QuerierFromCtx(ctx),
-		false,
 		id,
 	)
 }
@@ -301,47 +225,12 @@ func (o mail) SelectById(
 func (o mail) listUidConfId(
 	ctx context.Context,
 	q dbctx.Querier,
-	registerUpdate bool,
 	uid int64, confId int32,
 ) []*Mail {
 	const query = "SELECT " + selectColumnsMail +
 		" FROM user_mail" +
 		" WHERE uid = $1 AND conf_id = $2"
-
-	rows, err := q.Query(
-		ctx,
-		query,
-		uid, confId,
-	)
-	if err != nil {
-		panic(err)
-	}
-	defer rows.Close()
-
-	var result []*Mail
-
-	for rows.Next() {
-		obj := scanMailRows(rows)
-		if registerUpdate {
-			dbctx.RegisterDirtyObject(
-				ctx,
-				obj,
-				func(ctx context.Context) error {
-					return o.Update(ctx, obj)
-				},
-			)
-		}
-		result = append(
-			result,
-			obj,
-		)
-	}
-
-	if err := rows.Err(); err != nil {
-		panic(err)
-	}
-
-	return result
+	return dbctx.QueryList(ctx, q, query, scanMail, uid, confId)
 }
 
 func (o mail) ListByUidConfId(
@@ -351,7 +240,6 @@ func (o mail) ListByUidConfId(
 	return o.listUidConfId(
 		ctx,
 		dbctx.TxFromCtx(ctx),
-		true,
 		uid, confId,
 	)
 }
@@ -363,7 +251,6 @@ func (o mail) SelectListByUidConfId(
 	return o.listUidConfId(
 		ctx,
 		dbctx.QuerierFromCtx(ctx),
-		false,
 		uid, confId,
 	)
 }
@@ -371,225 +258,122 @@ func (o mail) SelectListByUidConfId(
 func (o mail) getAll(
 	ctx context.Context,
 	q dbctx.Querier,
-	registerUpdate bool,
 ) []*Mail {
 	const query = "SELECT " + selectColumnsMail +
 		" FROM user_mail"
-
-	rows, err := q.Query(
-		ctx,
-		query,
-	)
-	if err != nil {
-		panic(err)
-	}
-	defer rows.Close()
-
-	var result []*Mail
-
-	for rows.Next() {
-		obj := scanMailRows(rows)
-		if registerUpdate {
-			dbctx.RegisterDirtyObject(
-				ctx,
-				obj,
-				func(ctx context.Context) error {
-					return o.Update(ctx, obj)
-				},
-			)
-		}
-		result = append(
-			result,
-			obj,
-		)
-	}
-
-	if err := rows.Err(); err != nil {
-		panic(err)
-	}
-
-	return result
+	return dbctx.QueryList(ctx, q, query, scanMail)
 }
 
 func (o mail) GetAll(
 	ctx context.Context,
 ) []*Mail {
-	return o.getAll(
-		ctx,
-		dbctx.TxFromCtx(ctx),
-		true,
-	)
+	return o.getAll(ctx, dbctx.TxFromCtx(ctx))
 }
 
 func (o mail) SelectAll(
 	ctx context.Context,
 ) []*Mail {
-	return o.getAll(
-		ctx,
-		dbctx.QuerierFromCtx(ctx),
-		false,
-	)
+	return o.getAll(ctx, dbctx.QuerierFromCtx(ctx))
 }
 
 var ErrMailNotFound = errors.New(
 	"user_mail: row not found at update time",
 )
 
+// FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
+// UnitOfWork 据此跳过这一行，不占用一次往返。
+func (v *Mail) FlushStmt() (string, []any) {
+	if !v.loaded || v.dirty == 0 {
+		return "", nil
+	}
+	var sb strings.Builder
+	args := make([]any, 0, bits.OnesCount64(v.dirty)+1)
+	sb.WriteString("UPDATE user_mail SET ")
+	if v.dirty&dirtyMailUid != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.uid)
+		sb.WriteString("uid = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyMailConfId != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.confId)
+		sb.WriteString("conf_id = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyMailState != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.state)
+		sb.WriteString("state = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyMailReceiveAt != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.receiveAt)
+		sb.WriteString("receive_at = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyMailParams != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.params)
+		sb.WriteString("params = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyMailAwardList != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.awardList)
+		sb.WriteString("award_list = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	args = append(args, v.id)
+	sb.WriteString(" WHERE id = $")
+	sb.WriteString(strconv.Itoa(len(args)))
+	return sb.String(), args
+}
+
+// FlushDone 实现 dbctx.Flusher，在对应 UPDATE 执行成功后回调，
+// 同步 orig 快照并清空 dirty；rows == 0 说明这一行已被删除或从未存在。
+func (v *Mail) FlushDone(rows int64) error {
+	if rows == 0 {
+		return ErrMailNotFound
+	}
+	v.origUid = v.uid
+	v.origConfId = v.confId
+	v.origState = v.state
+	v.origReceiveAt = v.receiveAt
+	v.origParams = v.params
+	v.origAwardList = v.awardList
+	v.dirty = 0
+	return nil
+}
+
+// Update 是不经过 UnitOfWork 的直接落库入口，
+// 生成代码内部不再调用它，仅供业务代码需要立即写库时使用。
 func (o mail) Update(
 	ctx context.Context,
 	v *Mail,
 ) error {
-	tx := dbctx.TxFromCtx(ctx)
-
-	if !v.loaded {
-		return errors.New(
-			"update Mail must load first",
-		)
-	}
-
-	if len(v.dirty) == 0 {
+	query, args := v.FlushStmt()
+	if query == "" {
 		return nil
 	}
-
-	var sets []string
-	var args []any
-
-	n := 0
-
-	next := func() int {
-		n++
-		return n
-	}
-
-	if _, ok := v.dirty["uid"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"uid = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.uid,
-		)
-	}
-
-	if _, ok := v.dirty["conf_id"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"conf_id = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.confId,
-		)
-	}
-
-	if _, ok := v.dirty["state"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"state = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.state,
-		)
-	}
-
-	if _, ok := v.dirty["receive_at"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"receive_at = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.receiveAt,
-		)
-	}
-
-	if _, ok := v.dirty["params"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"params = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.params,
-		)
-	}
-
-	if _, ok := v.dirty["award_list"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"award_list = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.awardList,
-		)
-	}
-
-	args = append(
-		args,
-		v.id,
-	)
-
-	query := fmt.Sprintf(
-		"UPDATE user_mail SET %s WHERE id = $%d",
-		strings.Join(sets, ", "),
-		n+1,
-	)
-
-	tag, err := tx.Exec(
-		ctx,
-		query,
-		args...,
-	)
+	tag, err := dbctx.TxFromCtx(ctx).Exec(ctx, query, args...)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("user_mail update: %w", err)
 	}
-
-	if tag.RowsAffected() == 0 {
-		return ErrMailNotFound
-	}
-
-	v.origUid = v.uid
-
-	v.origConfId = v.confId
-
-	v.origState = v.state
-
-	v.origReceiveAt = v.receiveAt
-
-	v.origParams = v.params
-
-	v.origAwardList = v.awardList
-
-	v.dirty = make(map[string]struct{})
-
-	return nil
+	return v.FlushDone(tag.RowsAffected())
 }
 
 func (o mail) Insert(
@@ -597,7 +381,6 @@ func (o mail) Insert(
 	v *Mail,
 ) {
 	tx := dbctx.TxFromCtx(ctx)
-
 	const query = "INSERT INTO user_mail " +
 		"(uid, conf_id, state, receive_at, params, award_list) " +
 		"VALUES ($1, $2, $3, $4, $5, $6)" +
@@ -613,7 +396,6 @@ func (o mail) Insert(
 		v.params,
 		v.awardList,
 	)
-
 	if err := row.Scan(
 		&v.id,
 	); err != nil {
@@ -634,13 +416,6 @@ func (o mail) Insert(
 
 	v.origAwardList = v.awardList
 
-	v.dirty = make(map[string]struct{})
-
-	dbctx.RegisterDirtyObject(
-		ctx,
-		v,
-		func(ctx context.Context) error {
-			return o.Update(ctx, v)
-		},
-	)
+	v.dirty = 0
+	dbctx.Track(ctx, v)
 }

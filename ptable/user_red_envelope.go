@@ -6,9 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/bits"
+	"strconv"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"pdbgen/dbctx"
 )
 
@@ -16,28 +17,32 @@ var UserRedEnvelopeTable redEnvelope
 
 type redEnvelope struct{}
 
-type RedEnvelope struct {
-	id            int64
-	uid           int64
-	actId         int32
-	lastRefreshAt int64
-	todayCount    int32
-	total         int32
+const (
+	dirtyRedEnvelopeUid           uint64 = 1 << 0
+	dirtyRedEnvelopeActId         uint64 = 1 << 1
+	dirtyRedEnvelopeLastRefreshAt uint64 = 1 << 2
+	dirtyRedEnvelopeTodayCount    uint64 = 1 << 3
+	dirtyRedEnvelopeTotal         uint64 = 1 << 4
+)
 
+type RedEnvelope struct {
+	id                int64
+	uid               int64
+	actId             int32
+	lastRefreshAt     int64
+	todayCount        int32
+	total             int32
 	loaded            bool
 	origUid           int64
 	origActId         int32
 	origLastRefreshAt int64
 	origTodayCount    int32
 	origTotal         int32
-
-	dirty map[string]struct{}
+	dirty             uint64
 }
 
 func NewRedEnvelope() *RedEnvelope {
-	return &RedEnvelope{
-		dirty: make(map[string]struct{}),
-	}
+	return &RedEnvelope{}
 }
 
 func loadedRedEnvelope(
@@ -61,73 +66,62 @@ func loadedRedEnvelope(
 		origLastRefreshAt: lastRefreshAt,
 		origTodayCount:    todayCount,
 		origTotal:         total,
-		dirty:             make(map[string]struct{}),
 	}
 }
 
 func (o *RedEnvelope) Id() int64 {
 	return o.id
 }
-
 func (o *RedEnvelope) SetUid(v int64) {
 	if o.uid == v {
 		return
 	}
-
 	o.uid = v
-	o.dirty["uid"] = struct{}{}
+	o.dirty |= dirtyRedEnvelopeUid
 }
 
 func (o *RedEnvelope) Uid() int64 {
 	return o.uid
 }
-
 func (o *RedEnvelope) SetActId(v int32) {
 	if o.actId == v {
 		return
 	}
-
 	o.actId = v
-	o.dirty["act_id"] = struct{}{}
+	o.dirty |= dirtyRedEnvelopeActId
 }
 
 func (o *RedEnvelope) ActId() int32 {
 	return o.actId
 }
-
 func (o *RedEnvelope) SetLastRefreshAt(v int64) {
 	if o.lastRefreshAt == v {
 		return
 	}
-
 	o.lastRefreshAt = v
-	o.dirty["last_refresh_at"] = struct{}{}
+	o.dirty |= dirtyRedEnvelopeLastRefreshAt
 }
 
 func (o *RedEnvelope) LastRefreshAt() int64 {
 	return o.lastRefreshAt
 }
-
 func (o *RedEnvelope) SetTodayCount(v int32) {
 	if o.todayCount == v {
 		return
 	}
-
 	o.todayCount = v
-	o.dirty["today_count"] = struct{}{}
+	o.dirty |= dirtyRedEnvelopeTodayCount
 }
 
 func (o *RedEnvelope) TodayCount() int32 {
 	return o.todayCount
 }
-
 func (o *RedEnvelope) SetTotal(v int32) {
 	if o.total == v {
 		return
 	}
-
 	o.total = v
-	o.dirty["total"] = struct{}{}
+	o.dirty |= dirtyRedEnvelopeTotal
 }
 
 func (o *RedEnvelope) Total() int32 {
@@ -140,15 +134,12 @@ func (o *RedEnvelope) ResetToLoaded() {
 	o.lastRefreshAt = o.origLastRefreshAt
 	o.todayCount = o.origTodayCount
 	o.total = o.origTotal
-
-	o.dirty = make(map[string]struct{})
+	o.dirty = 0
 }
 
 const selectColumnsRedEnvelope = "id, uid, act_id, last_refresh_at, today_count, total"
 
-func scanRedEnvelopeRow(
-	row pgx.Row,
-) *RedEnvelope {
+func scanRedEnvelope(s dbctx.Scanner) (*RedEnvelope, error) {
 	var (
 		id            int64
 		uid           int64
@@ -157,8 +148,7 @@ func scanRedEnvelopeRow(
 		todayCount    int32
 		total         int32
 	)
-
-	if err := row.Scan(
+	if err := s.Scan(
 		&id,
 		&uid,
 		&actId,
@@ -166,13 +156,8 @@ func scanRedEnvelopeRow(
 		&todayCount,
 		&total,
 	); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-
-		panic(err)
+		return nil, err
 	}
-
 	return loadedRedEnvelope(
 		id,
 		uid,
@@ -180,73 +165,18 @@ func scanRedEnvelopeRow(
 		lastRefreshAt,
 		todayCount,
 		total,
-	)
-}
-
-func scanRedEnvelopeRows(
-	rows pgx.Rows,
-) *RedEnvelope {
-	var (
-		id            int64
-		uid           int64
-		actId         int32
-		lastRefreshAt int64
-		todayCount    int32
-		total         int32
-	)
-
-	if err := rows.Scan(
-		&id,
-		&uid,
-		&actId,
-		&lastRefreshAt,
-		&todayCount,
-		&total,
-	); err != nil {
-		panic(err)
-	}
-
-	return loadedRedEnvelope(
-		id,
-		uid,
-		actId,
-		lastRefreshAt,
-		todayCount,
-		total,
-	)
+	), nil
 }
 
 func (o redEnvelope) getId(
 	ctx context.Context,
 	q dbctx.Querier,
-	registerUpdate bool,
 	id int64,
 ) *RedEnvelope {
 	const query = "SELECT " + selectColumnsRedEnvelope +
 		" FROM user_red_envelope" +
 		" WHERE id = $1"
-
-	row := q.QueryRow(
-		ctx,
-		query,
-		id,
-	)
-
-	obj := scanRedEnvelopeRow(row)
-	if obj == nil {
-		return nil
-	}
-	if registerUpdate {
-		dbctx.RegisterDirtyObject(
-			ctx,
-			obj,
-			func(ctx context.Context) error {
-				return o.Update(ctx, obj)
-			},
-		)
-	}
-
-	return obj
+	return dbctx.QueryOne(ctx, q, query, scanRedEnvelope, id)
 }
 
 func (o redEnvelope) GetById(
@@ -256,7 +186,6 @@ func (o redEnvelope) GetById(
 	return o.getId(
 		ctx,
 		dbctx.TxFromCtx(ctx),
-		true,
 		id,
 	)
 }
@@ -268,7 +197,6 @@ func (o redEnvelope) SelectById(
 	return o.getId(
 		ctx,
 		dbctx.QuerierFromCtx(ctx),
-		false,
 		id,
 	)
 }
@@ -276,34 +204,12 @@ func (o redEnvelope) SelectById(
 func (o redEnvelope) getUidActId(
 	ctx context.Context,
 	q dbctx.Querier,
-	registerUpdate bool,
 	uid int64, actId int32,
 ) *RedEnvelope {
 	const query = "SELECT " + selectColumnsRedEnvelope +
 		" FROM user_red_envelope" +
 		" WHERE uid = $1 AND act_id = $2"
-
-	row := q.QueryRow(
-		ctx,
-		query,
-		uid, actId,
-	)
-
-	obj := scanRedEnvelopeRow(row)
-	if obj == nil {
-		return nil
-	}
-	if registerUpdate {
-		dbctx.RegisterDirtyObject(
-			ctx,
-			obj,
-			func(ctx context.Context) error {
-				return o.Update(ctx, obj)
-			},
-		)
-	}
-
-	return obj
+	return dbctx.QueryOne(ctx, q, query, scanRedEnvelope, uid, actId)
 }
 
 func (o redEnvelope) GetByUidActId(
@@ -313,7 +219,6 @@ func (o redEnvelope) GetByUidActId(
 	return o.getUidActId(
 		ctx,
 		dbctx.TxFromCtx(ctx),
-		true,
 		uid, actId,
 	)
 }
@@ -325,7 +230,6 @@ func (o redEnvelope) SelectByUidActId(
 	return o.getUidActId(
 		ctx,
 		dbctx.QuerierFromCtx(ctx),
-		false,
 		uid, actId,
 	)
 }
@@ -333,208 +237,113 @@ func (o redEnvelope) SelectByUidActId(
 func (o redEnvelope) getAll(
 	ctx context.Context,
 	q dbctx.Querier,
-	registerUpdate bool,
 ) []*RedEnvelope {
 	const query = "SELECT " + selectColumnsRedEnvelope +
 		" FROM user_red_envelope"
-
-	rows, err := q.Query(
-		ctx,
-		query,
-	)
-	if err != nil {
-		panic(err)
-	}
-	defer rows.Close()
-
-	var result []*RedEnvelope
-
-	for rows.Next() {
-		obj := scanRedEnvelopeRows(rows)
-		if registerUpdate {
-			dbctx.RegisterDirtyObject(
-				ctx,
-				obj,
-				func(ctx context.Context) error {
-					return o.Update(ctx, obj)
-				},
-			)
-		}
-		result = append(
-			result,
-			obj,
-		)
-	}
-
-	if err := rows.Err(); err != nil {
-		panic(err)
-	}
-
-	return result
+	return dbctx.QueryList(ctx, q, query, scanRedEnvelope)
 }
 
 func (o redEnvelope) GetAll(
 	ctx context.Context,
 ) []*RedEnvelope {
-	return o.getAll(
-		ctx,
-		dbctx.TxFromCtx(ctx),
-		true,
-	)
+	return o.getAll(ctx, dbctx.TxFromCtx(ctx))
 }
 
 func (o redEnvelope) SelectAll(
 	ctx context.Context,
 ) []*RedEnvelope {
-	return o.getAll(
-		ctx,
-		dbctx.QuerierFromCtx(ctx),
-		false,
-	)
+	return o.getAll(ctx, dbctx.QuerierFromCtx(ctx))
 }
 
 var ErrRedEnvelopeNotFound = errors.New(
 	"user_red_envelope: row not found at update time",
 )
 
+// FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
+// UnitOfWork 据此跳过这一行，不占用一次往返。
+func (v *RedEnvelope) FlushStmt() (string, []any) {
+	if !v.loaded || v.dirty == 0 {
+		return "", nil
+	}
+	var sb strings.Builder
+	args := make([]any, 0, bits.OnesCount64(v.dirty)+1)
+	sb.WriteString("UPDATE user_red_envelope SET ")
+	if v.dirty&dirtyRedEnvelopeUid != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.uid)
+		sb.WriteString("uid = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyRedEnvelopeActId != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.actId)
+		sb.WriteString("act_id = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyRedEnvelopeLastRefreshAt != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.lastRefreshAt)
+		sb.WriteString("last_refresh_at = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyRedEnvelopeTodayCount != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.todayCount)
+		sb.WriteString("today_count = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyRedEnvelopeTotal != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.total)
+		sb.WriteString("total = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	args = append(args, v.id)
+	sb.WriteString(" WHERE id = $")
+	sb.WriteString(strconv.Itoa(len(args)))
+	return sb.String(), args
+}
+
+// FlushDone 实现 dbctx.Flusher，在对应 UPDATE 执行成功后回调，
+// 同步 orig 快照并清空 dirty；rows == 0 说明这一行已被删除或从未存在。
+func (v *RedEnvelope) FlushDone(rows int64) error {
+	if rows == 0 {
+		return ErrRedEnvelopeNotFound
+	}
+	v.origUid = v.uid
+	v.origActId = v.actId
+	v.origLastRefreshAt = v.lastRefreshAt
+	v.origTodayCount = v.todayCount
+	v.origTotal = v.total
+	v.dirty = 0
+	return nil
+}
+
+// Update 是不经过 UnitOfWork 的直接落库入口，
+// 生成代码内部不再调用它，仅供业务代码需要立即写库时使用。
 func (o redEnvelope) Update(
 	ctx context.Context,
 	v *RedEnvelope,
 ) error {
-	tx := dbctx.TxFromCtx(ctx)
-
-	if !v.loaded {
-		return errors.New(
-			"update RedEnvelope must load first",
-		)
-	}
-
-	if len(v.dirty) == 0 {
+	query, args := v.FlushStmt()
+	if query == "" {
 		return nil
 	}
-
-	var sets []string
-	var args []any
-
-	n := 0
-
-	next := func() int {
-		n++
-		return n
-	}
-
-	if _, ok := v.dirty["uid"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"uid = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.uid,
-		)
-	}
-
-	if _, ok := v.dirty["act_id"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"act_id = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.actId,
-		)
-	}
-
-	if _, ok := v.dirty["last_refresh_at"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"last_refresh_at = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.lastRefreshAt,
-		)
-	}
-
-	if _, ok := v.dirty["today_count"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"today_count = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.todayCount,
-		)
-	}
-
-	if _, ok := v.dirty["total"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"total = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.total,
-		)
-	}
-
-	args = append(
-		args,
-		v.id,
-	)
-
-	query := fmt.Sprintf(
-		"UPDATE user_red_envelope SET %s WHERE id = $%d",
-		strings.Join(sets, ", "),
-		n+1,
-	)
-
-	tag, err := tx.Exec(
-		ctx,
-		query,
-		args...,
-	)
+	tag, err := dbctx.TxFromCtx(ctx).Exec(ctx, query, args...)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("user_red_envelope update: %w", err)
 	}
-
-	if tag.RowsAffected() == 0 {
-		return ErrRedEnvelopeNotFound
-	}
-
-	v.origUid = v.uid
-
-	v.origActId = v.actId
-
-	v.origLastRefreshAt = v.lastRefreshAt
-
-	v.origTodayCount = v.todayCount
-
-	v.origTotal = v.total
-
-	v.dirty = make(map[string]struct{})
-
-	return nil
+	return v.FlushDone(tag.RowsAffected())
 }
 
 func (o redEnvelope) Insert(
@@ -542,7 +351,6 @@ func (o redEnvelope) Insert(
 	v *RedEnvelope,
 ) {
 	tx := dbctx.TxFromCtx(ctx)
-
 	const query = "INSERT INTO user_red_envelope " +
 		"(uid, act_id, last_refresh_at, today_count, total) " +
 		"VALUES ($1, $2, $3, $4, $5)" +
@@ -557,7 +365,6 @@ func (o redEnvelope) Insert(
 		v.todayCount,
 		v.total,
 	)
-
 	if err := row.Scan(
 		&v.id,
 	); err != nil {
@@ -576,13 +383,6 @@ func (o redEnvelope) Insert(
 
 	v.origTotal = v.total
 
-	v.dirty = make(map[string]struct{})
-
-	dbctx.RegisterDirtyObject(
-		ctx,
-		v,
-		func(ctx context.Context) error {
-			return o.Update(ctx, v)
-		},
-	)
+	v.dirty = 0
+	dbctx.Track(ctx, v)
 }

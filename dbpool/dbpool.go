@@ -119,29 +119,68 @@ func withTx(ctx context.Context, prepare func(context.Context, pgx.Tx) error, fn
 	return fn(ctx)
 }
 
-// WithTryAdvisoryLock 拿不到锁时会直接返回
-func WithTryAdvisoryLock(ctx context.Context, lockKey string, lockValue int64, fn func(context.Context) error) error {
+// WithTryAdvisoryLock 使用单 bigint 形式的咨询锁，拿不到锁直接返回。
+// key 的含义由调用方决定，框架不关心。
+func WithTryAdvisoryLock(ctx context.Context, key int64, fn func(context.Context) error) error {
 	return withTx(
 		ctx,
 		func(ctx context.Context, tx pgx.Tx) error {
-			return prepare(ctx, tx, true, lockKey, lockValue)
+			return prepare(ctx, tx, true, lockKey(key))
+		},
+		fn,
+	)
+}
+
+// WithTryAdvisoryLock2 使用双 int32 形式的咨询锁，拿不到锁直接返回。
+// ns/id 的含义由调用方决定，框架不关心。
+func WithTryAdvisoryLock2(ctx context.Context, ns, id int32, fn func(context.Context) error) error {
+	return withTx(
+		ctx,
+		func(ctx context.Context, tx pgx.Tx) error {
+			return prepare(ctx, tx, true, lockKey2{ns: ns, id: id})
 		},
 		fn,
 	)
 }
 
 // WithAdvisoryLock 拿不到锁时会阻塞
-func WithAdvisoryLock(ctx context.Context, lockKey string, lockValue int64, fn func(context.Context) error) error {
+func WithAdvisoryLock(ctx context.Context, key int64, fn func(context.Context) error) error {
 	return withTx(
 		ctx,
 		func(ctx context.Context, tx pgx.Tx) error {
-			return prepare(ctx, tx, false, lockKey, lockValue)
+			return prepare(ctx, tx, false, lockKey(key))
 		},
 		fn,
 	)
 }
 
-func prepare(ctx context.Context, tx pgx.Tx, tryLock bool, lockKey string, lockValue int64) error {
+func WithAdvisoryLock2(ctx context.Context, ns, id int32, fn func(context.Context) error) error {
+	return withTx(
+		ctx,
+		func(ctx context.Context, tx pgx.Tx) error {
+			return prepare(ctx, tx, false, lockKey2{ns: ns, id: id})
+		},
+		fn,
+	)
+}
+
+type lockArgs interface {
+	sql(fn string) (string, []any)
+}
+
+type lockKey int64 // 单 bigint 形式
+
+func (k lockKey) sql(fn string) (string, []any) {
+	return fmt.Sprintf("SELECT %s($1)", fn), []any{int64(k)}
+}
+
+type lockKey2 struct{ ns, id int32 } // 双 int32 形式
+
+func (k lockKey2) sql(fn string) (string, []any) {
+	return fmt.Sprintf("SELECT %s($1, $2)", fn), []any{k.ns, k.id}
+}
+
+func prepare(ctx context.Context, tx pgx.Tx, tryLock bool, lock lockArgs) error {
 	batch := &pgx.Batch{}
 
 	if statementTimeoutMs > 0 {
@@ -156,11 +195,12 @@ func prepare(ctx context.Context, tx pgx.Tx, tryLock bool, lockKey string, lockV
 		batch.Queue(fmt.Sprintf("SET LOCAL lock_timeout = %d", lockTimeoutMs))
 	}
 
+	fn := "pg_advisory_xact_lock"
 	if tryLock {
-		batch.Queue("SELECT pg_try_advisory_xact_lock(hashtext($1), $2)", lockKey, lockValue)
-	} else {
-		batch.Queue("SELECT pg_advisory_xact_lock(hashtext($1), $2)", lockKey, lockValue)
+		fn = "pg_try_advisory_xact_lock"
 	}
+	query, args := lock.sql(fn)
+	batch.Queue(query, args...)
 
 	if batch.Len() == 0 {
 		return nil

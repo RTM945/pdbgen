@@ -6,9 +6,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/bits"
+	"strconv"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
 	"pdbgen/dbctx"
 )
 
@@ -16,26 +17,29 @@ var UserTable user
 
 type user struct{}
 
-type User struct {
-	id          int64
-	name        string
-	lastLoginAt int64
-	createdAt   int64
-	token       string
+const (
+	dirtyUserName        uint64 = 1 << 0
+	dirtyUserLastLoginAt uint64 = 1 << 1
+	dirtyUserCreatedAt   uint64 = 1 << 2
+	dirtyUserToken       uint64 = 1 << 3
+)
 
+type User struct {
+	id              int64
+	name            string
+	lastLoginAt     int64
+	createdAt       int64
+	token           string
 	loaded          bool
 	origName        string
 	origLastLoginAt int64
 	origCreatedAt   int64
 	origToken       string
-
-	dirty map[string]struct{}
+	dirty           uint64
 }
 
 func NewUser() *User {
-	return &User{
-		dirty: make(map[string]struct{}),
-	}
+	return &User{}
 }
 
 func loadedUser(
@@ -56,60 +60,51 @@ func loadedUser(
 		origLastLoginAt: lastLoginAt,
 		origCreatedAt:   createdAt,
 		origToken:       token,
-		dirty:           make(map[string]struct{}),
 	}
 }
 
 func (o *User) Id() int64 {
 	return o.id
 }
-
 func (o *User) SetName(v string) {
 	if o.name == v {
 		return
 	}
-
 	o.name = v
-	o.dirty["name"] = struct{}{}
+	o.dirty |= dirtyUserName
 }
 
 func (o *User) Name() string {
 	return o.name
 }
-
 func (o *User) SetLastLoginAt(v int64) {
 	if o.lastLoginAt == v {
 		return
 	}
-
 	o.lastLoginAt = v
-	o.dirty["last_login_at"] = struct{}{}
+	o.dirty |= dirtyUserLastLoginAt
 }
 
 func (o *User) LastLoginAt() int64 {
 	return o.lastLoginAt
 }
-
 func (o *User) SetCreatedAt(v int64) {
 	if o.createdAt == v {
 		return
 	}
-
 	o.createdAt = v
-	o.dirty["created_at"] = struct{}{}
+	o.dirty |= dirtyUserCreatedAt
 }
 
 func (o *User) CreatedAt() int64 {
 	return o.createdAt
 }
-
 func (o *User) SetToken(v string) {
 	if o.token == v {
 		return
 	}
-
 	o.token = v
-	o.dirty["token"] = struct{}{}
+	o.dirty |= dirtyUserToken
 }
 
 func (o *User) Token() string {
@@ -121,15 +116,12 @@ func (o *User) ResetToLoaded() {
 	o.lastLoginAt = o.origLastLoginAt
 	o.createdAt = o.origCreatedAt
 	o.token = o.origToken
-
-	o.dirty = make(map[string]struct{})
+	o.dirty = 0
 }
 
 const selectColumnsUser = "id, name, last_login_at, created_at, token"
 
-func scanUserRow(
-	row pgx.Row,
-) *User {
+func scanUser(s dbctx.Scanner) (*User, error) {
 	var (
 		id          int64
 		name        string
@@ -137,91 +129,33 @@ func scanUserRow(
 		createdAt   int64
 		token       string
 	)
-
-	if err := row.Scan(
+	if err := s.Scan(
 		&id,
 		&name,
 		&lastLoginAt,
 		&createdAt,
 		&token,
 	); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-
-		panic(err)
+		return nil, err
 	}
-
 	return loadedUser(
 		id,
 		name,
 		lastLoginAt,
 		createdAt,
 		token,
-	)
-}
-
-func scanUserRows(
-	rows pgx.Rows,
-) *User {
-	var (
-		id          int64
-		name        string
-		lastLoginAt int64
-		createdAt   int64
-		token       string
-	)
-
-	if err := rows.Scan(
-		&id,
-		&name,
-		&lastLoginAt,
-		&createdAt,
-		&token,
-	); err != nil {
-		panic(err)
-	}
-
-	return loadedUser(
-		id,
-		name,
-		lastLoginAt,
-		createdAt,
-		token,
-	)
+	), nil
 }
 
 func (o user) getId(
 	ctx context.Context,
 	q dbctx.Querier,
-	registerUpdate bool,
 	id int64,
 ) *User {
 	const query = "SELECT " + selectColumnsUser +
 		" FROM user" +
 		" WHERE id = $1"
-
-	row := q.QueryRow(
-		ctx,
-		query,
-		id,
-	)
-
-	obj := scanUserRow(row)
-	if obj == nil {
-		return nil
-	}
-	if registerUpdate {
-		dbctx.RegisterDirtyObject(
-			ctx,
-			obj,
-			func(ctx context.Context) error {
-				return o.Update(ctx, obj)
-			},
-		)
-	}
-
-	return obj
+	return dbctx.QueryOne(ctx, q, query, scanUser, id)
 }
 
 func (o user) GetById(
@@ -231,7 +165,6 @@ func (o user) GetById(
 	return o.getId(
 		ctx,
 		dbctx.TxFromCtx(ctx),
-		true,
 		id,
 	)
 }
@@ -243,7 +176,6 @@ func (o user) SelectById(
 	return o.getId(
 		ctx,
 		dbctx.QuerierFromCtx(ctx),
-		false,
 		id,
 	)
 }
@@ -251,191 +183,104 @@ func (o user) SelectById(
 func (o user) getAll(
 	ctx context.Context,
 	q dbctx.Querier,
-	registerUpdate bool,
 ) []*User {
 	const query = "SELECT " + selectColumnsUser +
 		" FROM user"
-
-	rows, err := q.Query(
-		ctx,
-		query,
-	)
-	if err != nil {
-		panic(err)
-	}
-	defer rows.Close()
-
-	var result []*User
-
-	for rows.Next() {
-		obj := scanUserRows(rows)
-		if registerUpdate {
-			dbctx.RegisterDirtyObject(
-				ctx,
-				obj,
-				func(ctx context.Context) error {
-					return o.Update(ctx, obj)
-				},
-			)
-		}
-		result = append(
-			result,
-			obj,
-		)
-	}
-
-	if err := rows.Err(); err != nil {
-		panic(err)
-	}
-
-	return result
+	return dbctx.QueryList(ctx, q, query, scanUser)
 }
 
 func (o user) GetAll(
 	ctx context.Context,
 ) []*User {
-	return o.getAll(
-		ctx,
-		dbctx.TxFromCtx(ctx),
-		true,
-	)
+	return o.getAll(ctx, dbctx.TxFromCtx(ctx))
 }
 
 func (o user) SelectAll(
 	ctx context.Context,
 ) []*User {
-	return o.getAll(
-		ctx,
-		dbctx.QuerierFromCtx(ctx),
-		false,
-	)
+	return o.getAll(ctx, dbctx.QuerierFromCtx(ctx))
 }
 
 var ErrUserNotFound = errors.New(
 	"user: row not found at update time",
 )
 
+// FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
+// UnitOfWork 据此跳过这一行，不占用一次往返。
+func (v *User) FlushStmt() (string, []any) {
+	if !v.loaded || v.dirty == 0 {
+		return "", nil
+	}
+	var sb strings.Builder
+	args := make([]any, 0, bits.OnesCount64(v.dirty)+1)
+	sb.WriteString("UPDATE user SET ")
+	if v.dirty&dirtyUserName != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.name)
+		sb.WriteString("name = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyUserLastLoginAt != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.lastLoginAt)
+		sb.WriteString("last_login_at = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyUserCreatedAt != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.createdAt)
+		sb.WriteString("created_at = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	if v.dirty&dirtyUserToken != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.token)
+		sb.WriteString("token = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+	args = append(args, v.id)
+	sb.WriteString(" WHERE id = $")
+	sb.WriteString(strconv.Itoa(len(args)))
+	return sb.String(), args
+}
+
+// FlushDone 实现 dbctx.Flusher，在对应 UPDATE 执行成功后回调，
+// 同步 orig 快照并清空 dirty；rows == 0 说明这一行已被删除或从未存在。
+func (v *User) FlushDone(rows int64) error {
+	if rows == 0 {
+		return ErrUserNotFound
+	}
+	v.origName = v.name
+	v.origLastLoginAt = v.lastLoginAt
+	v.origCreatedAt = v.createdAt
+	v.origToken = v.token
+	v.dirty = 0
+	return nil
+}
+
+// Update 是不经过 UnitOfWork 的直接落库入口，
+// 生成代码内部不再调用它，仅供业务代码需要立即写库时使用。
 func (o user) Update(
 	ctx context.Context,
 	v *User,
 ) error {
-	tx := dbctx.TxFromCtx(ctx)
-
-	if !v.loaded {
-		return errors.New(
-			"update User must load first",
-		)
-	}
-
-	if len(v.dirty) == 0 {
+	query, args := v.FlushStmt()
+	if query == "" {
 		return nil
 	}
-
-	var sets []string
-	var args []any
-
-	n := 0
-
-	next := func() int {
-		n++
-		return n
-	}
-
-	if _, ok := v.dirty["name"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"name = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.name,
-		)
-	}
-
-	if _, ok := v.dirty["last_login_at"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"last_login_at = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.lastLoginAt,
-		)
-	}
-
-	if _, ok := v.dirty["created_at"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"created_at = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.createdAt,
-		)
-	}
-
-	if _, ok := v.dirty["token"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"token = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.token,
-		)
-	}
-
-	args = append(
-		args,
-		v.id,
-	)
-
-	query := fmt.Sprintf(
-		"UPDATE user SET %s WHERE id = $%d",
-		strings.Join(sets, ", "),
-		n+1,
-	)
-
-	tag, err := tx.Exec(
-		ctx,
-		query,
-		args...,
-	)
+	tag, err := dbctx.TxFromCtx(ctx).Exec(ctx, query, args...)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("user update: %w", err)
 	}
-
-	if tag.RowsAffected() == 0 {
-		return ErrUserNotFound
-	}
-
-	v.origName = v.name
-
-	v.origLastLoginAt = v.lastLoginAt
-
-	v.origCreatedAt = v.createdAt
-
-	v.origToken = v.token
-
-	v.dirty = make(map[string]struct{})
-
-	return nil
+	return v.FlushDone(tag.RowsAffected())
 }
 
 func (o user) Insert(
@@ -443,7 +288,6 @@ func (o user) Insert(
 	v *User,
 ) {
 	tx := dbctx.TxFromCtx(ctx)
-
 	const query = "INSERT INTO user " +
 		"(name, last_login_at, created_at, token) " +
 		"VALUES ($1, $2, $3, $4)" +
@@ -457,7 +301,6 @@ func (o user) Insert(
 		v.createdAt,
 		v.token,
 	)
-
 	if err := row.Scan(
 		&v.id,
 	); err != nil {
@@ -474,13 +317,6 @@ func (o user) Insert(
 
 	v.origToken = v.token
 
-	v.dirty = make(map[string]struct{})
-
-	dbctx.RegisterDirtyObject(
-		ctx,
-		v,
-		func(ctx context.Context) error {
-			return o.Update(ctx, v)
-		},
-	)
+	v.dirty = 0
+	dbctx.Track(ctx, v)
 }

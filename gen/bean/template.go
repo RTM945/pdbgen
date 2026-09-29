@@ -8,34 +8,36 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/bits"
+	"strconv"
 	"strings"
-	
+
 	"pdbgen/dbctx"
-	"github.com/jackc/pgx/v5"
 )
 
 var {{ .TableAccessor }} {{ .ReceiverName }}
 
-type {{ .ReceiverName }} struct {}
+type {{ .ReceiverName }} struct{}
+
+const (
+{{- range $i, $f := .UpdateFields }}
+	dirty{{ $.TypeName }}{{ $f.MethodName }} uint64 = 1 << {{ $i }}
+{{- end }}
+)
 
 type {{ .TypeName }} struct {
 {{- range .Fields }}
 	{{ .Name }} {{ .GoType }}
 {{- end }}
-
 	loaded bool
-
 {{- range .UpdateFields }}
 	orig{{ .MethodName }} {{ .GoType }}
 {{- end }}
-
-	dirty map[string]struct{}
+	dirty uint64
 }
 
 func New{{ .TypeName }}() *{{ .TypeName }} {
-	return &{{ .TypeName }}{
-		dirty: make(map[string]struct{}),
-	}
+	return &{{ .TypeName }}{}
 }
 
 func loaded{{ .TypeName }}(
@@ -51,32 +53,26 @@ func loaded{{ .TypeName }}(
 {{- range .UpdateFields }}
 		orig{{ .MethodName }}: {{ .Name }},
 {{- end }}
-		dirty: make(map[string]struct{}),
 	}
 }
 
 {{ range .Fields }}
 {{- if .IsPrimaryKey }}
-
 func (o *{{ $.TypeName }}) {{ .MethodName }}() {{ .GoType }} {
 	return o.{{ .Name }}
 }
-
 {{- else }}
-
 func (o *{{ $.TypeName }}) Set{{ .MethodName }}(v {{ .GoType }}) {
 	if o.{{ .Name }} == v {
 		return
 	}
-
 	o.{{ .Name }} = v
-	o.dirty["{{ .Column }}"] = struct{}{}
+	o.dirty |= dirty{{ $.TypeName }}{{ .MethodName }}
 }
 
 func (o *{{ $.TypeName }}) {{ .MethodName }}() {{ .GoType }} {
 	return o.{{ .Name }}
 }
-
 {{- end }}
 {{- end }}
 
@@ -84,113 +80,43 @@ func (o *{{ .TypeName }}) ResetToLoaded() {
 {{- range .UpdateFields }}
 	o.{{ .Name }} = o.orig{{ .MethodName }}
 {{- end }}
-
-	o.dirty = make(map[string]struct{})
+	o.dirty = 0
 }
 
 const selectColumns{{ .TypeName }} = "{{ .SelectColumns }}"
 
-func scan{{ .TypeName }}Row(
-	row pgx.Row,
-) *{{ .TypeName }} {
+func scan{{ .TypeName }}(s dbctx.Scanner) (*{{ .TypeName }}, error) {
 	var (
 {{- range .Fields }}
 		{{ .Name }} {{ .GoType }}
 {{- end }}
 	)
-
-	if err := row.Scan(
+	if err := s.Scan(
 {{- range .Fields }}
 		&{{ .Name }},
 {{- end }}
 	); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-
-		panic(err)
+		return nil, err
 	}
-
 	return loaded{{ .TypeName }}(
 {{- range .Fields }}
 		{{ .Name }},
 {{- end }}
-	)
-}
-
-func scan{{ .TypeName }}Rows(
-	rows pgx.Rows,
-) *{{ .TypeName }} {
-	var (
-{{- range .Fields }}
-		{{ .Name }} {{ .GoType }}
-{{- end }}
-	)
-
-	if err := rows.Scan(
-{{- range .Fields }}
-		&{{ .Name }},
-{{- end }}
-	); err != nil {
-		panic(err)
-	}
-
-	return loaded{{ .TypeName }}(
-{{- range .Fields }}
-		{{ .Name }},
-{{- end }}
-	)
+	), nil
 }
 
 {{ range .QueryMethods }}
-
 {{ if .IsList }}
-
 func (o {{ $.ReceiverName }}) list{{ .Name }}(
 	ctx context.Context,
 	q dbctx.Querier,
-	registerUpdate bool,
 	{{ .Params }},
 ) []*{{ $.TypeName }} {
 	const query =
 		"SELECT " + selectColumns{{ $.TypeName }} +
-			" FROM {{ $.TableName }}" +
-			" WHERE {{ .Where }}"
-
-	rows, err := q.Query(
-		ctx,
-		query,
-		{{ .Args }},
-	)
-	if err != nil {
-		panic(err)
-	}
-	defer rows.Close()
-
-	var result []*{{ $.TypeName }}
-
-	for rows.Next() {
-		obj := scan{{ $.TypeName }}Rows(rows)
-		if registerUpdate {
-			dbctx.RegisterDirtyObject(
-				ctx,
-				obj,
-				func(ctx context.Context) error {
-					return o.Update(ctx, obj)
-				},
-			)
-		}
-		result = append(
-			result,
-			obj,
-		)
-	}
-
-	if err := rows.Err(); err != nil {
-		panic(err)
-	}
-
-	return result
+		" FROM {{ $.TableName }}" +
+		" WHERE {{ .Where }}"
+	return dbctx.QueryList(ctx, q, query, scan{{ $.TypeName }}, {{ .Args }})
 }
 
 func (o {{ $.ReceiverName }}) ListBy{{ .Name }}(
@@ -200,7 +126,6 @@ func (o {{ $.ReceiverName }}) ListBy{{ .Name }}(
 	return o.list{{ .Name }}(
 		ctx,
 		dbctx.TxFromCtx(ctx),
-		true,
 		{{ .Args }},
 	)
 }
@@ -212,46 +137,20 @@ func (o {{ $.ReceiverName }}) SelectListBy{{ .Name }}(
 	return o.list{{ .Name }}(
 		ctx,
 		dbctx.QuerierFromCtx(ctx),
-		false,
 		{{ .Args }},
 	)
 }
-
 {{ else }}
-
 func (o {{ $.ReceiverName }}) get{{ .Name }}(
 	ctx context.Context,
 	q dbctx.Querier,
-	registerUpdate bool,
 	{{ .Params }},
 ) *{{ $.TypeName }} {
 	const query =
 		"SELECT " + selectColumns{{ $.TypeName }} +
-			" FROM {{ $.TableName }}" +
-			" WHERE {{ .Where }}"
-
-	row := q.QueryRow(
-		ctx,
-		query,
-		{{ .Args }},
-	)
-
-	obj := scan{{ $.TypeName }}Row(row)
-	if obj == nil {
-		return nil
-	}
-	if registerUpdate {
-		dbctx.RegisterDirtyObject(
-			ctx,
-			obj,
-			func(ctx context.Context) error {
-				return o.Update(ctx, obj)
-			},
-		)
-	}
-	
-
-	return obj
+		" FROM {{ $.TableName }}" +
+		" WHERE {{ .Where }}"
+	return dbctx.QueryOne(ctx, q, query, scan{{ $.TypeName }}, {{ .Args }})
 }
 
 func (o {{ $.ReceiverName }}) GetBy{{ .Name }}(
@@ -261,7 +160,6 @@ func (o {{ $.ReceiverName }}) GetBy{{ .Name }}(
 	return o.get{{ .Name }}(
 		ctx,
 		dbctx.TxFromCtx(ctx),
-		true,
 		{{ .Args }},
 	)
 }
@@ -273,156 +171,91 @@ func (o {{ $.ReceiverName }}) SelectBy{{ .Name }}(
 	return o.get{{ .Name }}(
 		ctx,
 		dbctx.QuerierFromCtx(ctx),
-		false,
 		{{ .Args }},
 	)
 }
-
 {{ end }}
 {{ end }}
 
 func (o {{ .ReceiverName }}) getAll(
 	ctx context.Context,
 	q dbctx.Querier,
-	registerUpdate bool,
 ) []*{{ .TypeName }} {
 	const query =
 		"SELECT " + selectColumns{{ .TypeName }} +
-			" FROM {{ .TableName }}"
-
-	rows, err := q.Query(
-		ctx,
-		query,
-	)
-	if err != nil {
-		panic(err)
-	}
-	defer rows.Close()
-
-	var result []*{{ .TypeName }}
-
-	for rows.Next() {
-		obj := scan{{ .TypeName }}Rows(rows)
-		if registerUpdate {
-			dbctx.RegisterDirtyObject(
-				ctx,
-				obj,
-				func(ctx context.Context) error {
-					return o.Update(ctx, obj)
-				},
-			)
-		}
-		result = append(
-			result,
-			obj,
-		)
-	}
-
-	if err := rows.Err(); err != nil {
-		panic(err)
-	}
-
-	return result
+		" FROM {{ .TableName }}"
+	return dbctx.QueryList(ctx, q, query, scan{{ .TypeName }})
 }
 
 func (o {{ .ReceiverName }}) GetAll(
 	ctx context.Context,
 ) []*{{ .TypeName }} {
-	return o.getAll(
-		ctx,
-		dbctx.TxFromCtx(ctx),
-		true,
-	)
+	return o.getAll(ctx, dbctx.TxFromCtx(ctx))
 }
 
 func (o {{ .ReceiverName }}) SelectAll(
 	ctx context.Context,
 ) []*{{ .TypeName }} {
-	return o.getAll(
-		ctx,
-		dbctx.QuerierFromCtx(ctx),
-		false,
-	)
+	return o.getAll(ctx, dbctx.QuerierFromCtx(ctx))
 }
 
 var {{ .ErrorName }} = errors.New(
 	"{{ .TableName }}: row not found at update time",
 )
 
+// FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
+// UnitOfWork 据此跳过这一行，不占用一次往返。
+func (v *{{ .TypeName }}) FlushStmt() (string, []any) {
+	if !v.loaded || v.dirty == 0 {
+		return "", nil
+	}
+	var sb strings.Builder
+	args := make([]any, 0, bits.OnesCount64(v.dirty)+1)
+	sb.WriteString("UPDATE {{ .TableName }} SET ")
+{{- range .UpdateFields }}
+	if v.dirty&dirty{{ $.TypeName }}{{ .MethodName }} != 0 {
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, v.{{ .Name }})
+		sb.WriteString("{{ .Column }} = $")
+		sb.WriteString(strconv.Itoa(len(args)))
+	}
+{{- end }}
+	args = append(args, v.{{ .PK.Name }})
+	sb.WriteString(" WHERE {{ .PK.Column }} = $")
+	sb.WriteString(strconv.Itoa(len(args)))
+	return sb.String(), args
+}
+
+// FlushDone 实现 dbctx.Flusher，在对应 UPDATE 执行成功后回调，
+// 同步 orig 快照并清空 dirty；rows == 0 说明这一行已被删除或从未存在。
+func (v *{{ .TypeName }}) FlushDone(rows int64) error {
+	if rows == 0 {
+		return {{ .ErrorName }}
+	}
+{{- range .UpdateFields }}
+	v.orig{{ .MethodName }} = v.{{ .Name }}
+{{- end }}
+	v.dirty = 0
+	return nil
+}
+
+// Update 是不经过 UnitOfWork 的直接落库入口，
+// 生成代码内部不再调用它，仅供业务代码需要立即写库时使用。
 func (o {{ .ReceiverName }}) Update(
 	ctx context.Context,
 	v *{{ .TypeName }},
 ) error {
-	tx := dbctx.TxFromCtx(ctx)
-
-	if !v.loaded {
-		return errors.New(
-			"update {{ .TypeName }} must load first",
-		)
-	}
-
-	if len(v.dirty) == 0 {
+	query, args := v.FlushStmt()
+	if query == "" {
 		return nil
 	}
-
-	var sets []string
-	var args []any
-
-	n := 0
-
-	next := func() int {
-		n++
-		return n
-	}
-
-{{ range .UpdateFields }}
-	if _, ok := v.dirty["{{ .Column }}"]; ok {
-		sets = append(
-			sets,
-			fmt.Sprintf(
-				"{{ .Column }} = $%d",
-				next(),
-			),
-		)
-
-		args = append(
-			args,
-			v.{{ .Name }},
-		)
-	}
-{{ end }}
-
-	args = append(
-		args,
-		v.{{ .PK.Name }},
-	)
-
-	query := fmt.Sprintf(
-		"UPDATE {{ .TableName }} SET %s WHERE {{ .PK.Column }} = $%d",
-		strings.Join(sets, ", "),
-		n+1,
-	)
-
-	tag, err := tx.Exec(
-		ctx,
-		query,
-		args...,
-	)
+	tag, err := dbctx.TxFromCtx(ctx).Exec(ctx, query, args...)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("{{ .TableName }} update: %w", err)
 	}
-
-	if tag.RowsAffected() == 0 {
-		return {{ .ErrorName }}
-	}
-
-{{ range .UpdateFields }}
-	v.orig{{ .MethodName }} = v.{{ .Name }}
-{{ end }}
-
-	v.dirty = make(map[string]struct{})
-
-	return nil
+	return v.FlushDone(tag.RowsAffected())
 }
 
 func (o {{ .ReceiverName }}) Insert(
@@ -430,15 +263,12 @@ func (o {{ .ReceiverName }}) Insert(
 	v *{{ .TypeName }},
 ) {
 	tx := dbctx.TxFromCtx(ctx)
-
 	const query =
 		"INSERT INTO {{ .TableName }} " +
-			"({{ range $i, $field := .InsertFields }}{{ if $i }}, {{ end }}{{ $field.Column }}{{ end }}) " +
-			"VALUES ({{ range $i, $field := .InsertFields }}{{ if $i }}, {{ end }}${{ add $i 1 }}{{ end }})"{{ if .AutoIncrement }} +
-			" RETURNING {{ .PK.Column }}"{{ end }}
-
+		"({{ range $i, $field := .InsertFields }}{{ if $i }}, {{ end }}{{ $field.Column }}{{ end }}) " +
+		"VALUES ({{ range $i, $field := .InsertFields }}{{ if $i }}, {{ end }}${{ add $i 1 }}{{ end }})"{{ if .AutoIncrement }} +
+		" RETURNING {{ .PK.Column }}"{{ end }}
 {{ if .AutoIncrement }}
-
 	row := tx.QueryRow(
 		ctx,
 		query,
@@ -446,15 +276,12 @@ func (o {{ .ReceiverName }}) Insert(
 		v.{{ .Name }},
 {{- end }}
 	)
-
 	if err := row.Scan(
 		&v.{{ .PK.Name }},
 	); err != nil {
 		panic(err)
 	}
-
 {{ else }}
-
 	if _, err := tx.Exec(
 		ctx,
 		query,
@@ -464,23 +291,12 @@ func (o {{ .ReceiverName }}) Insert(
 	); err != nil {
 		panic(err)
 	}
-
 {{ end }}
-
 	v.loaded = true
-
 {{ range .UpdateFields }}
 	v.orig{{ .MethodName }} = v.{{ .Name }}
 {{ end }}
-
-	v.dirty = make(map[string]struct{})
-
-	dbctx.RegisterDirtyObject(
-		ctx,
-		v,
-		func(ctx context.Context) error {
-			return o.Update(ctx, v)
-		},
-	)
+	v.dirty = 0
+	dbctx.Track(ctx, v)
 }
 `
