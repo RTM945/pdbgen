@@ -25,6 +25,11 @@ type Schema struct {
 	IdleInTransactionSessionTimeoutMs int `xml:"idleInTransactionSessionTimeoutMs,attr"`
 	LockTimeoutMs                     int `xml:"lockTimeoutMs,attr"`
 
+	// TransactionTimeoutMs 一个事务（BEGIN 到 COMMIT）的总时长上限。
+	// statement_timeout 只管单条语句，管不住"很多条语句加起来很慢"；
+	// PG 17 之前也没有事务级的 GUC，所以只能在客户端这边包一层。
+	TransactionTimeoutMs int `xml:"transactionTimeoutMs,attr"`
+
 	ShowSQL bool `xml:"showSQL,attr"`
 
 	AppName string `xml:"appName,attr"`

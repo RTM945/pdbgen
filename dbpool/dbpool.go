@@ -19,6 +19,7 @@ var (
 	statementTimeoutMs                int
 	idleInTransactionSessionTimeoutMs int
 	lockTimeoutMs                     int
+	transactionTimeoutMs              int
 	sqlLogger                         logger
 	showSQL                           bool
 )
@@ -29,6 +30,21 @@ type logger interface {
 }
 
 var ErrAdvisoryLockNotAcquired = errors.New("advisory lock not acquired")
+
+// Close 关掉连接池。进程退出前收摊用，重复调用安全。
+//
+// 调用时机有要求：必须排在 HTTP 服务优雅关闭**之后**。pgxpool 的 Close 会
+// 阻塞到所有借出的连接归还，并且拒绝后续的 Acquire——在途请求还没跑完就调
+// 它，等于把它们打死在半路。
+//
+// 收益不大（进程退出时 OS 本来就会关 socket，PG 一样会清理），主要是让
+// PG 和 pg_bouncer 看到的是"客户端主动断开"而不是"连接消失"。
+func Close() {
+	if dbpool == nil {
+		return
+	}
+	dbpool.Close()
+}
 
 func Init(ctx context.Context, pdb *readxml.Schema) error {
 	cfg, err := pgxpool.ParseConfig(pdb.URL)
@@ -52,6 +68,7 @@ func Init(ctx context.Context, pdb *readxml.Schema) error {
 	statementTimeoutMs = pdb.StatementTimeoutMs
 	idleInTransactionSessionTimeoutMs = pdb.IdleInTransactionSessionTimeoutMs
 	lockTimeoutMs = pdb.LockTimeoutMs
+	transactionTimeoutMs = pdb.TransactionTimeoutMs
 	showSQL = pdb.ShowSQL
 	sqlLogger = log.Default()
 	return nil
@@ -76,6 +93,14 @@ func Query(ctx context.Context, fn func(context.Context) error) error {
 //}
 
 func withTx(ctx context.Context, prepare func(context.Context, pgx.Tx) error, fn func(context.Context) error) (err error) {
+	// 整个事务一个总预算。statement_timeout 只管单条语句，一堆语句加起来慢
+	// 它拦不住；PG 17 之前也没有事务级的 GUC。
+	if transactionTimeoutMs > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(transactionTimeoutMs)*time.Millisecond)
+		defer cancel()
+	}
+
 	tx, err := dbpool.Begin(ctx)
 	if err != nil {
 		return err
@@ -103,9 +128,15 @@ func withTx(ctx context.Context, prepare func(context.Context, pgx.Tx) error, fn
 			return
 		}
 
-		// Commit 失败时事务状态可能已经不确定，
-		// 不再依赖 Rollback。
-		if err = tx.Commit(ctx); err != nil {
+		// Commit 用 WithoutCancel：业务语句吃上面那个总预算，但 COMMIT 一旦
+		// 发出去就必须等到结果。pgx 在 ctx 取消时会发 CancelRequest 并关连接，
+		// 而 COMMIT 可能已经被 PG 执行完了——那时客户端就不知道到底提交没有，
+		// 重试会导致重复发放。换掉 ctx 之后，"Commit 失败"只剩进程被杀、
+		// TCP 断这类不可控来源。
+		//
+		// 注意这时候事务状态仍可能因为进程被杀而变成不确定的，所以照旧不依赖
+		// 下面的 Rollback 兜底。
+		if err = tx.Commit(context.WithoutCancel(ctx)); err != nil {
 			return
 		}
 	}()
