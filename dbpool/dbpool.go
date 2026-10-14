@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"pdbgen/dbctx"
 	"pdbgen/readxml"
 	"time"
@@ -20,13 +20,24 @@ var (
 	idleInTransactionSessionTimeoutMs int
 	lockTimeoutMs                     int
 	transactionTimeoutMs              int
-	sqlLogger                         logger
 	showSQL                           bool
 )
 
-type logger interface {
-	Println(v ...any)
-	Printf(format string, v ...any)
+// SetLogger 换掉 SQL 日志的落点，不设就用 slog.Default()。
+//
+// nil 表示回落到 slog.Default()，而且是**调用时**才解析——所以应用在
+// dbpool.Init 之后再 slog.SetDefault 也来得及。
+// 想给 SQL 日志单独一个 handler（写去别的文件、单独控级别）就显式调这个。
+func SetLogger(l *slog.Logger) { sqlLog = l }
+
+// sqlLog 见 SetLogger。只由 SetLogger 写，读的时候统一走 log()。
+var sqlLog *slog.Logger
+
+func log() *slog.Logger {
+	if sqlLog != nil {
+		return sqlLog
+	}
+	return slog.Default()
 }
 
 var ErrAdvisoryLockNotAcquired = errors.New("advisory lock not acquired")
@@ -70,7 +81,6 @@ func Init(ctx context.Context, pdb *readxml.Schema) error {
 	lockTimeoutMs = pdb.LockTimeoutMs
 	transactionTimeoutMs = pdb.TransactionTimeoutMs
 	showSQL = pdb.ShowSQL
-	sqlLogger = log.Default()
 	return nil
 }
 

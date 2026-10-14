@@ -284,8 +284,8 @@ docker run -d \
 ```
 
 # build 
-cd ../ddl/
+cd .\gen\ddl\
 go build -o genddl.exe
 
-cd ..\bean\        
+cd .\gen\bean\        
 go build -o genbeans.exe

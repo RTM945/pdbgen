@@ -15,7 +15,6 @@ import (
 
 type loggingDB struct {
 	dbctx.DB
-	logger logger
 }
 
 func (o *loggingDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
@@ -23,7 +22,7 @@ func (o *loggingDB) Exec(ctx context.Context, sql string, args ...any) (pgconn.C
 
 	tag, err := o.DB.Exec(ctx, sql, args...)
 
-	o.log(start, sql, args, err)
+	logSQL(start, sql, args, err)
 
 	return tag, err
 }
@@ -33,7 +32,7 @@ func (o *loggingDB) Query(ctx context.Context, sql string, args ...any) (pgx.Row
 
 	rows, err := o.DB.Query(ctx, sql, args...)
 
-	o.log(start, sql, args, err)
+	logSQL(start, sql, args, err)
 
 	return rows, err
 }
@@ -44,62 +43,56 @@ func (o *loggingDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.R
 	row := o.DB.QueryRow(ctx, sql, args...)
 
 	return &loggingRow{
-		row:    row,
-		start:  start,
-		sql:    sql,
-		args:   args,
-		logger: o.logger,
+		row:   row,
+		start: start,
+		sql:   sql,
+		args:  args,
 	}
 }
 
-func (o *loggingDB) log(start time.Time, sql string, args []any, err error) {
-	if o.logger == nil {
-		return
-	}
-
-	elapsed := time.Since(start)
-
-	o.logger.Println(
-		"COST", elapsed,
-		"SQL", formatSQL(sql, args),
-	)
-	if err != nil {
-		o.logger.Println(err)
-	}
-}
-
+// wrapLogger 只在 showSQL 打开时才包这一层。包上之后每条 SQL 都会记一条
+// message 是 "sql" 的日志：成功 Info，失败 Error（err 作为属性带上）。
 func wrapLogger(db dbctx.DB) dbctx.DB {
-	if !showSQL || sqlLogger == nil {
+	if !showSQL {
 		return db
 	}
-
-	return &loggingDB{
-		DB:     db,
-		logger: sqlLogger,
-	}
+	return &loggingDB{DB: db}
 }
 
-func logBatch(start time.Time, batch *pgx.Batch, err error) {
-	if !showSQL || sqlLogger == nil {
+func logSQL(start time.Time, sql string, args []any, err error) {
+	stmt := formatSQL(sql, args)
+	cost := time.Since(start)
+
+	if err != nil {
+		log().Error("sql", "cost", cost, "stmt", stmt, "err", err)
 		return
 	}
-	sqls := make([]string, 0, len(batch.QueuedQueries))
+	log().Info("sql", "cost", cost, "stmt", stmt)
+}
+
+// logBatch 一次往返里排队的多条语句。它们是一个整体，所以记成一条而不是 N 条，
+// 否则日志里看不出"这几条是一起发的"。
+func logBatch(start time.Time, batch *pgx.Batch, err error) {
+	if !showSQL {
+		return
+	}
+
+	stmts := make([]string, 0, len(batch.QueuedQueries))
 	for _, q := range batch.QueuedQueries {
-		sqls = append(sqls, formatSQL(q.SQL, q.Arguments))
+		stmts = append(stmts, formatSQL(q.SQL, q.Arguments))
 	}
-	sqlLogger.Printf(
-		"SQL BATCH COST=%s COUNT=%d \nSQL=[\n\t%s\n]",
-		time.Since(start),
-		len(sqls),
-		strings.Join(sqls, "\n\t"),
-	)
+
+	cost := time.Since(start)
 	if err != nil {
-		sqlLogger.Println(err)
+		log().Error("sql batch", "cost", cost, "count", len(stmts), "stmts", stmts, "err", err)
+		return
 	}
+	log().Info("sql batch", "cost", cost, "count", len(stmts), "stmts", stmts)
 }
 
 var placeholderRE = regexp.MustCompile(`\$([1-9][0-9]*)`)
 
+// formatSQL 把 $1 这类占位符换回实际值，日志里的语句就能直接粘去 psql 跑。
 func formatSQL(sql string, args []any) string {
 	sql = placeholderRE.ReplaceAllStringFunc(sql, func(s string) string {
 		n, _ := strconv.Atoi(s[1:])
@@ -128,12 +121,12 @@ func sqlLiteral(v any) string {
 	}
 }
 
+// loggingRow 拖到 Scan 才记：只调 QueryRow 不 Scan 的话语句根本没发出去。
 type loggingRow struct {
 	row    pgx.Row
 	start  time.Time
 	sql    string
 	args   []any
-	logger logger
 	logged bool
 }
 
@@ -142,16 +135,7 @@ func (r *loggingRow) Scan(dest ...any) error {
 
 	if !r.logged {
 		r.logged = true
-
-		if r.logger != nil {
-			r.logger.Println(
-				"COST", time.Since(r.start),
-				"SQL", formatSQL(r.sql, r.args),
-			)
-			if err != nil {
-				r.logger.Println(err)
-			}
-		}
+		logSQL(r.start, r.sql, r.args, err)
 	}
 
 	return err
