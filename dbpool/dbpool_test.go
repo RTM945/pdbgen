@@ -1,22 +1,10 @@
 package dbpool
 
 import (
-	"context"
-	"pdbgen/readxml"
 	"testing"
 )
 
+// TestPG 只验证连接池能起来。初始化在 TestMain 里做，见 identity_test.go。
 func TestPG(t *testing.T) {
-	schema, err := readxml.LoadSchema("../pdb.xml")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	err = Init(ctx, schema)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := dbpool.Ping(ctx); err != nil {
-		t.Fatal(err)
-	}
+	setupTestDB(t)
 }

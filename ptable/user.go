@@ -119,6 +119,18 @@ func (o *User) ResetToLoaded() {
 	o.dirty = 0
 }
 
+// TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
+// UnitOfWork 用它们检测同一事务里是否有两个对象指向同一行。
+func (o *User) TableName() string {
+	return "user"
+}
+
+// Identity 实现 dbctx.Flusher。主键自增且还没回填时返回零值，
+// 表示这个对象还没有身份。
+func (o *User) Identity() int64 {
+	return o.id
+}
+
 const selectColumnsUser = "id, name, last_login_at, created_at, token"
 
 func scanUser(s dbctx.Scanner) (*User, error) {
@@ -319,4 +331,7 @@ func (o user) Insert(
 
 	v.dirty = 0
 	dbctx.Track(ctx, v)
+	// 注意：Insert 不登记身份表。插入之后这一行的对象就在调用方手里，业务代码
+	// 直接传参使用，不会回头再查一次；此时库里也还看不到这一行（未提交），
+	// 按索引查本来就是空。
 }

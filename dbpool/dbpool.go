@@ -97,12 +97,11 @@ func Query(ctx context.Context, fn func(context.Context) error) error {
 	return fn(ctx)
 }
 
-// 只要开事务必加咨询锁
-//func WithTx(ctx context.Context, fn func(context.Context) error) error {
-//	return withTx(ctx, nil, fn)
-//}
+func WithTx(ctx context.Context, fn func(context.Context) error) error {
+	return WithTxPrepare(ctx, nil, fn)
+}
 
-func withTx(ctx context.Context, prepare func(context.Context, pgx.Tx) error, fn func(context.Context) error) (err error) {
+func WithTxPrepare(ctx context.Context, prepare func(context.Context, pgx.Tx) error, fn func(context.Context) error) (err error) {
 	// 整个事务一个总预算。statement_timeout 只管单条语句，一堆语句加起来慢
 	// 它拦不住；PG 17 之前也没有事务级的 GUC。
 	if transactionTimeoutMs > 0 {
@@ -163,7 +162,7 @@ func withTx(ctx context.Context, prepare func(context.Context, pgx.Tx) error, fn
 // WithTryAdvisoryLock 使用单 bigint 形式的咨询锁，拿不到锁直接返回。
 // key 的含义由调用方决定，框架不关心。
 func WithTryAdvisoryLock(ctx context.Context, key int64, fn func(context.Context) error) error {
-	return withTx(
+	return WithTxPrepare(
 		ctx,
 		func(ctx context.Context, tx pgx.Tx) error {
 			return prepare(ctx, tx, true, lockKey(key))
@@ -175,7 +174,7 @@ func WithTryAdvisoryLock(ctx context.Context, key int64, fn func(context.Context
 // WithTryAdvisoryLock2 使用双 int32 形式的咨询锁，拿不到锁直接返回。
 // ns/id 的含义由调用方决定，框架不关心。
 func WithTryAdvisoryLock2(ctx context.Context, ns, id int32, fn func(context.Context) error) error {
-	return withTx(
+	return WithTxPrepare(
 		ctx,
 		func(ctx context.Context, tx pgx.Tx) error {
 			return prepare(ctx, tx, true, lockKey2{ns: ns, id: id})
@@ -186,7 +185,7 @@ func WithTryAdvisoryLock2(ctx context.Context, ns, id int32, fn func(context.Con
 
 // WithAdvisoryLock 拿不到锁时会阻塞
 func WithAdvisoryLock(ctx context.Context, key int64, fn func(context.Context) error) error {
-	return withTx(
+	return WithTxPrepare(
 		ctx,
 		func(ctx context.Context, tx pgx.Tx) error {
 			return prepare(ctx, tx, false, lockKey(key))
@@ -196,7 +195,7 @@ func WithAdvisoryLock(ctx context.Context, key int64, fn func(context.Context) e
 }
 
 func WithAdvisoryLock2(ctx context.Context, ns, id int32, fn func(context.Context) error) error {
-	return withTx(
+	return WithTxPrepare(
 		ctx,
 		func(ctx context.Context, tx pgx.Tx) error {
 			return prepare(ctx, tx, false, lockKey2{ns: ns, id: id})

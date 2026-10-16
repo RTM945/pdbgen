@@ -83,6 +83,18 @@ func (o *{{ .TypeName }}) ResetToLoaded() {
 	o.dirty = 0
 }
 
+// TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
+// UnitOfWork 用它们检测同一事务里是否有两个对象指向同一行。
+func (o *{{ .TypeName }}) TableName() string {
+	return "{{ .TableName }}"
+}
+
+// Identity 实现 dbctx.Flusher。主键自增且还没回填时返回零值，
+// 表示这个对象还没有身份。
+func (o *{{ .TypeName }}) Identity() int64 {
+	return o.{{ .PK.Name }}
+}
+
 const selectColumns{{ .TypeName }} = "{{ .SelectColumns }}"
 
 func scan{{ .TypeName }}(s dbctx.Scanner) (*{{ .TypeName }}, error) {

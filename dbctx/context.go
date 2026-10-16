@@ -2,6 +2,7 @@ package dbctx
 
 import (
 	"context"
+	"errors"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -32,7 +33,13 @@ type Scanner interface {
 // FlushStmt 返回空 query 表示这个对象没有被修改过，无需落库。
 // FlushDone 在对应语句执行成功后回调，用来同步 orig 状态、清 dirty，
 // 并根据受影响行数判断这一行是否还存在。
+//
+// TableName 和 Identity 一起给出一行的身份，UnitOfWork 用它们检测"同一个事务里
+// 有两个对象指向同一行"——那会导致两条 UPDATE 各写各的、后写的静默覆盖先写的。
+// 主键自增且还没回填（Insert 之前）时 Identity 返回 0，表示这个对象还没有身份。
 type Flusher interface {
+	TableName() string
+	Identity() int64
 	FlushStmt() (query string, args []any)
 	FlushDone(rowsAffected int64) error
 }
@@ -99,7 +106,7 @@ func QueryOne[T Flusher](
 	row := q.QueryRow(ctx, query, args...)
 	obj, err := scan(row)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return zero
 		}
 		panic(err)
