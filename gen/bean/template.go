@@ -126,7 +126,7 @@ func (o {{ $.ReceiverName }}) list{{ .Name }}(
 ) []*{{ $.TypeName }} {
 	const query =
 		"SELECT " + selectColumns{{ $.TypeName }} +
-		" FROM {{ $.TableName }}" +
+		" FROM {{ quote $.TableName }}" +
 		" WHERE {{ .Where }}"
 	return dbctx.QueryList(ctx, q, query, scan{{ $.TypeName }}, {{ .Args }})
 }
@@ -160,7 +160,7 @@ func (o {{ $.ReceiverName }}) get{{ .Name }}(
 ) *{{ $.TypeName }} {
 	const query =
 		"SELECT " + selectColumns{{ $.TypeName }} +
-		" FROM {{ $.TableName }}" +
+		" FROM {{ quote $.TableName }}" +
 		" WHERE {{ .Where }}"
 	return dbctx.QueryOne(ctx, q, query, scan{{ $.TypeName }}, {{ .Args }})
 }
@@ -195,7 +195,7 @@ func (o {{ .ReceiverName }}) getAll(
 ) []*{{ .TypeName }} {
 	const query =
 		"SELECT " + selectColumns{{ .TypeName }} +
-		" FROM {{ .TableName }}"
+		" FROM {{ quote .TableName }}"
 	return dbctx.QueryList(ctx, q, query, scan{{ .TypeName }})
 }
 
@@ -223,7 +223,7 @@ func (v *{{ .TypeName }}) FlushStmt() (string, []any) {
 	}
 	var sb strings.Builder
 	args := make([]any, 0, bits.OnesCount64(v.dirty)+1)
-	sb.WriteString("UPDATE {{ .TableName }} SET ")
+	sb.WriteString("UPDATE {{ quote .TableName }} SET ")
 {{- range .UpdateFields }}
 	if v.dirty&dirty{{ $.TypeName }}{{ .MethodName }} != 0 {
 		if len(args) > 0 {
@@ -276,7 +276,7 @@ func (o {{ .ReceiverName }}) Insert(
 ) {
 	tx := dbctx.TxFromCtx(ctx)
 	const query =
-		"INSERT INTO {{ .TableName }} " +
+		"INSERT INTO {{ quote .TableName }} " +
 		"({{ range $i, $field := .InsertFields }}{{ if $i }}, {{ end }}{{ $field.Column }}{{ end }}) " +
 		"VALUES ({{ range $i, $field := .InsertFields }}{{ if $i }}, {{ end }}${{ add $i 1 }}{{ end }})"{{ if .AutoIncrement }} +
 		" RETURNING {{ .PK.Column }}"{{ end }}

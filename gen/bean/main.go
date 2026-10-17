@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"pdbgen/readxml"
+	"strconv"
 	"strings"
 	"text/template"
 )
@@ -63,6 +64,7 @@ func generateTable(schema *readxml.Schema, table readxml.Table) ([]byte, error) 
 			"add": func(a, b int) int {
 				return a + b
 			},
+			"quote": quoteIdent,
 		}).
 		Parse(sourceTemplate)
 	if err != nil {
@@ -81,6 +83,14 @@ func generateTable(schema *readxml.Schema, table readxml.Table) ([]byte, error) 
 	}
 
 	return formatted, nil
+}
+
+// quoteIdent 返回嵌入 Go 字符串字面量后的 SQL 标识符：user -> \"user\"。
+// 模板里这几处都在 "..." 内部，所以 SQL 的双引号必须再转义一层。
+// 表名可能是 user 这种保留字，不引用的话生成的 DML 直接语法错误（DDL 侧本来就引用了）。
+func quoteIdent(s string) string {
+	q := strconv.Quote(`"` + strings.ReplaceAll(s, `"`, `""`) + `"`)
+	return q[1 : len(q)-1]
 }
 
 func buildTableGen(schema *readxml.Schema, table readxml.Table) (readxml.TableGen, error) {
