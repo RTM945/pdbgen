@@ -63,11 +63,14 @@ func logSQL(start time.Time, sql string, args []any, err error) {
 	stmt := formatSQL(sql, args)
 	cost := time.Since(start)
 
+	// 用 []string 而不是裸 string：项目的 logging handler 会把 []string
+	// 按行原样展开，不再给整句加引号、也不转义里面标识符的双引号。
+	// 这样日志里的 "user" 这类带引号的表名可以直接复制去 psql 跑。
 	if err != nil {
-		log().Error("sql", "cost", cost, "stmt", stmt, "err", err)
+		log().Error("sql", "cost", cost, "stmt", []string{stmt}, "err", err)
 		return
 	}
-	log().Info("sql", "cost", cost, "stmt", stmt)
+	log().Info("sql", "cost", cost, "stmt", []string{stmt})
 }
 
 // logBatch 一次往返里排队的多条语句。它们是一个整体，所以记成一条而不是 N 条，
