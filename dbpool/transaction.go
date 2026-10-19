@@ -26,6 +26,11 @@ type Transaction struct {
 	seen          map[dbctx.Flusher]struct{}
 	cachedRecords map[recordKey]dbctx.Flusher
 
+	// snapshots 是每个登记对象第一次进入事务时的整条快照。
+	// newObjects 记录本次事务里 Insert 过的对象，回滚时用 ResetNew 而不是恢复快照。
+	snapshots  map[dbctx.Flusher]dbctx.RecordState
+	newObjects map[dbctx.Flusher]struct{}
+
 	afterCommit   []func(context.Context)
 	afterRollback []func(context.Context)
 }
@@ -35,6 +40,8 @@ func NewTransaction() *Transaction {
 		items:         make([]dbctx.Flusher, 0, 16),
 		seen:          make(map[dbctx.Flusher]struct{}),
 		cachedRecords: make(map[recordKey]dbctx.Flusher),
+		snapshots:     make(map[dbctx.Flusher]dbctx.RecordState),
+		newObjects:    make(map[dbctx.Flusher]struct{}),
 	}
 }
 
@@ -54,6 +61,12 @@ func (t *Transaction) AddCachedRecord(obj dbctx.Flusher) dbctx.Flusher {
 		return nil
 	}
 
+	// 第一次看到这个对象时拍快照。命中已有记录时新对象会被丢弃，
+	// 不会走到这里；同一个指针重复登记也不会覆盖第一次的快照。
+	if _, ok := t.snapshots[obj]; !ok {
+		t.snapshots[obj] = obj.SnapshotState()
+	}
+
 	// 先处理身份：Identity 可能在对象第一次登记后才回填（Insert RETURNING id），
 	// 所以不能因为 seen 命中就跳过缓存登记。
 	if id := obj.Identity(); id != 0 {
@@ -70,6 +83,39 @@ func (t *Transaction) AddCachedRecord(obj dbctx.Flusher) dbctx.Flusher {
 	t.seen[obj] = struct{}{}
 	t.items = append(t.items, obj)
 	return obj
+}
+
+// RegisterNew 实现 dbctx.Transaction。Insert 在发 SQL 前调用，
+// 记录 Insert 之前的状态；回滚时用 ResetNew 让对象可以重新插入或被丢弃。
+func (t *Transaction) RegisterNew(obj dbctx.Flusher) {
+	if obj == nil {
+		return
+	}
+	if _, ok := t.snapshots[obj]; !ok {
+		t.snapshots[obj] = obj.SnapshotState()
+	}
+	t.newObjects[obj] = struct{}{}
+}
+
+// Rollback 实现 dbctx.Transaction：恢复本次事务内所有缓存记录的快照。
+// Insert 过的对象不恢复快照，而是 ResetNew（清主键/loaded/dirty）并移出身份表。
+func (t *Transaction) Rollback() {
+	for obj, state := range t.snapshots {
+		if _, isNew := t.newObjects[obj]; isNew {
+			if id := obj.Identity(); id != 0 {
+				delete(t.cachedRecords, recordKey{table: obj.TableName(), id: id})
+			}
+			obj.ResetNew()
+			continue
+		}
+		obj.RestoreState(state)
+	}
+
+	t.snapshots = nil
+	t.newObjects = nil
+	t.cachedRecords = nil
+	t.items = nil
+	t.seen = nil
 }
 
 // Deprecated: use AddCachedRecord.

@@ -26,6 +26,10 @@ func (f *fakeTransaction) GetCachedRecord(string, int64) (dbctx.Flusher, bool) {
 
 func (f *fakeTransaction) AddCachedRecord(obj dbctx.Flusher) dbctx.Flusher { return obj }
 
+func (f *fakeTransaction) RegisterNew(dbctx.Flusher) {}
+
+func (f *fakeTransaction) Rollback() {}
+
 func (f *fakeTransaction) AfterCommit(fn func(context.Context)) { f.commitFns++ }
 
 func (f *fakeTransaction) AfterRollback(fn func(context.Context)) { f.rollbackFns++ }

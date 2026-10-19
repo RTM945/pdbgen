@@ -11,6 +11,7 @@ import (
 type rowStub struct {
 	table string
 	id    int64
+	value int
 }
 
 func (s *rowStub) TableName() string { return s.table }
@@ -22,6 +23,12 @@ func (s *rowStub) FlushStmt() (string, []any) {
 }
 
 func (s *rowStub) FlushDone(int64) error { return nil }
+
+func (s *rowStub) SnapshotState() dbctx.RecordState { return *s }
+
+func (s *rowStub) RestoreState(state dbctx.RecordState) { *s = state.(rowStub) }
+
+func (s *rowStub) ResetNew() { s.id = 0 }
 
 // TestAddCachedRecordReturnsExisting 同一行的第二个对象不会登记，
 // 返回第一次登记的对象（xdb: getCachedTRecord 命中后直接用已有记录）。
@@ -113,6 +120,61 @@ func TestGetCachedRecordMiss(t *testing.T) {
 	txn := NewTransaction()
 	if rec, ok := txn.GetCachedRecord("user_mail", 7); ok || rec != nil {
 		t.Fatalf("未登记的行不应命中，实际 rec=%v ok=%v", rec, ok)
+	}
+}
+
+func TestRollbackRestoresSnapshots(t *testing.T) {
+	txn := NewTransaction()
+	obj := &rowStub{table: "user_mail", id: 7, value: 1}
+	txn.AddCachedRecord(obj)
+
+	obj.value = 99
+	txn.Rollback()
+
+	if obj.value != 1 {
+		t.Fatalf("回滚后应恢复快照，实际 value=%d", obj.value)
+	}
+	if obj.id != 7 {
+		t.Fatalf("回滚后 id 应恢复，实际 id=%d", obj.id)
+	}
+}
+
+func TestRollbackRestoresMultipleRecords(t *testing.T) {
+	txn := NewTransaction()
+	a := &rowStub{table: "user_mail", id: 1, value: 1}
+	b := &rowStub{table: "user_gm_mail", id: 2, value: 2}
+	txn.AddCachedRecord(a)
+	txn.AddCachedRecord(b)
+
+	a.value = 10
+	b.value = 20
+	txn.Rollback()
+
+	if a.value != 1 || b.value != 2 {
+		t.Fatalf("回滚后应恢复所有快照，实际 a=%d b=%d", a.value, b.value)
+	}
+}
+
+func TestRollbackResetsNewRecord(t *testing.T) {
+	txn := NewTransaction()
+	obj := &rowStub{table: "user_mail", id: 0, value: 5}
+	txn.RegisterNew(obj)
+
+	obj.id = 7
+	obj.value = 99
+	txn.AddCachedRecord(obj)
+
+	if rec, ok := txn.GetCachedRecord("user_mail", 7); !ok || rec != obj {
+		t.Fatalf("Insert 后应能按主键命中")
+	}
+
+	txn.Rollback()
+
+	if obj.id != 0 {
+		t.Fatalf("Insert 回滚后 id 应清零，实际 id=%d", obj.id)
+	}
+	if _, ok := txn.GetCachedRecord("user_mail", 7); ok {
+		t.Fatal("Insert 回滚后身份表不应再有这行")
 	}
 }
 

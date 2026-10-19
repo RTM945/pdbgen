@@ -14,6 +14,11 @@ func (r *testRecord) TableName() string          { return r.table }
 func (r *testRecord) Identity() int64            { return r.id }
 func (r *testRecord) FlushStmt() (string, []any) { return "", nil }
 func (r *testRecord) FlushDone(int64) error      { return nil }
+func (r *testRecord) SnapshotState() RecordState { return *r }
+func (r *testRecord) RestoreState(state RecordState) {
+	*r = state.(testRecord)
+}
+func (r *testRecord) ResetNew() { r.id = 0 }
 
 type otherRecord struct {
 	testRecord
@@ -41,6 +46,10 @@ func (t *testTransaction) AddCachedRecord(obj Flusher) Flusher {
 	t.records[key] = obj
 	return obj
 }
+
+func (t *testTransaction) RegisterNew(Flusher) {}
+
+func (t *testTransaction) Rollback() {}
 
 func (t *testTransaction) AfterCommit(func(context.Context))   {}
 func (t *testTransaction) AfterRollback(func(context.Context)) {}

@@ -38,6 +38,20 @@ type User struct {
 	dirty           uint64
 }
 
+type userState struct {
+	id              int64
+	name            string
+	lastLoginAt     int64
+	createdAt       int64
+	token           string
+	loaded          bool
+	origName        string
+	origLastLoginAt int64
+	origCreatedAt   int64
+	origToken       string
+	dirty           uint64
+}
+
 func NewUser() *User {
 	return &User{}
 }
@@ -117,6 +131,44 @@ func (o *User) ResetToLoaded() {
 	o.createdAt = o.origCreatedAt
 	o.token = o.origToken
 	o.dirty = 0
+}
+
+func (v *User) SnapshotState() dbctx.RecordState {
+	return userState{
+		id:              v.id,
+		name:            v.name,
+		lastLoginAt:     v.lastLoginAt,
+		createdAt:       v.createdAt,
+		token:           v.token,
+		loaded:          v.loaded,
+		origName:        v.origName,
+		origLastLoginAt: v.origLastLoginAt,
+		origCreatedAt:   v.origCreatedAt,
+		origToken:       v.origToken,
+		dirty:           v.dirty,
+	}
+}
+
+func (v *User) RestoreState(state dbctx.RecordState) {
+	s := state.(userState)
+	v.id = s.id
+	v.name = s.name
+	v.lastLoginAt = s.lastLoginAt
+	v.createdAt = s.createdAt
+	v.token = s.token
+	v.loaded = s.loaded
+	v.origName = s.origName
+	v.origLastLoginAt = s.origLastLoginAt
+	v.origCreatedAt = s.origCreatedAt
+	v.origToken = s.origToken
+	v.dirty = s.dirty
+}
+
+// ResetNew 把 Insert 回滚后的对象恢复成"未加载"状态。
+func (v *User) ResetNew() {
+	v.id = 0
+	v.loaded = false
+	v.dirty = 0
 }
 
 // TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
@@ -303,6 +355,7 @@ func (o user) Insert(
 	ctx context.Context,
 	v *User,
 ) {
+	dbctx.RegisterNew(ctx, v)
 	tx := dbctx.SQLTxFromCtx(ctx)
 	const query = "INSERT INTO \"user\" " +
 		"(name, last_login_at, created_at, token) " +

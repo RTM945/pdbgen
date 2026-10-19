@@ -62,7 +62,7 @@ b.SetTotal(42)
 
 ### 2.4 错误靠 panic 传播，事务边界统一收口
 
-生成代码遇到 pgx 错误直接 panic；`QueryOne` 查不到返回 nil（`ErrNoRows` 不算错误），其他错误 panic。`WithTxPrepare` 的 defer 按"panic 回滚 / 有错回滚 / flush / commit"的顺序收尾，panic 会**回滚后原样重抛**（要接住它必须包住整个 `WithTx` 调用，放在回调里的 `recover` 接不到）。业务回调里不需要逐个检查 SQL 错误。
+生成代码遇到 pgx 错误直接 panic；`QueryOne` 查不到返回 nil（`ErrNoRows` 不算错误），其他错误 panic。`WithTxPrepare` 的 defer 按"panic 恢复内存+回滚 / 有错恢复内存+回滚 / flush 失败恢复内存+回滚 / commit"的顺序收尾，panic 会**回滚后原样重抛**（要接住它必须包住整个 `WithTx` 调用，放在回调里的 `recover` 接不到）。业务回调里不需要逐个检查 SQL 错误。
 
 ### 2.5 `GetXxx` 与 `SelectXxx` 互斥
 
@@ -73,6 +73,13 @@ b.SetTotal(42)
 | `dbpool.Query` | 否（是则报错） | 连接池 | 否 |
 
 事务里从池里另取一条连接读数据，会读到事务未提交前的旧值——所以框架直接把这条路封死。
+
+### 2.6 失败时恢复内存对象
+
+- 对象第一次进入事务身份表时，`Transaction` 调用生成的 `SnapshotState()` 保存整条快照（字段值 + orig + dirty + id + loaded）。
+- 业务返回错误、panic、或 Flush 失败时，`WithTxPrepare` 先调用 `Transaction.Rollback()` 恢复所有快照，再回滚 SQLTx，最后执行 AfterRollback 钩子。
+- `Insert` 在发 SQL 前调用 `dbctx.RegisterNew`；回滚时这些对象走 `ResetNew`：清主键（自增时）、`loaded=false`、`dirty=0`，并从身份表移除。
+- COMMIT 返回错误时结果不确定：**不回滚内存对象**，也不执行提交/回滚钩子；调用方应丢弃这批对象。
 
 ## 3. 事务、锁与超时
 
@@ -116,7 +123,7 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 `dbctx.AfterCommit(ctx, fn)` / `dbctx.AfterRollback(ctx, fn)` 把任务挂到当前事务：
 
 - **AfterCommit** 只在 COMMIT 明确成功后执行；COMMIT 返回错误时结果不确定，两个钩子都不执行——可能已提交，不能发失败通知；也可能没提交，不能发成功通知。
-- **AfterRollback** 在业务返回错误、panic、或 Flush 失败导致回滚后执行。
+- **AfterRollback** 在业务返回错误、panic、或 Flush 失败导致回滚后执行；执行时内存对象已经由 `Transaction.Rollback` 恢复。
 - **顺序**：都按注册顺序执行；同步执行在调用方 goroutine 上，慢钩子会拖慢请求。
 - **没有事务时**：直接执行（没有提交点可等）。
 - **上下文**：钩子拿到的是调用方 ctx 去掉取消/超时、且不带 SQLTx/Transaction 的副本；保留请求 ID 等值。钩子要查库用 `dbpool.Query`，不要用 `GetByXxx`（事务方法）拿事务 ctx。
@@ -128,7 +135,7 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 | 生成物 | 说明 |
 |---|---|
 | `NewXxx()` | 空对象，没有身份 |
-| `GetById` / `SelectById` | 主键查询 |
+| `GetById` / `SelectById` | 主键查询；`GetById` 在事务里先查身份表，命中不发 SQL |
 | `GetByYyy` / `SelectByYyy` | **unique 索引**查询（`index unique="true"`） |
 | `ListByYyy` / `SelectListByYyy` | **非 unique 索引**查询，返回 `[]*Xxx` |
 | `GetAll` / `SelectAll` | 全表，返回 `[]*Xxx` |
@@ -136,24 +143,34 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 | `TableName()` | 表名常量，实现 `dbctx.Flusher`，供身份表解析用 |
 | `Identity()` | 主键值，0 表示还没回填（还没 `Insert`），不参与身份表解析 |
 | `FlushStmt()` / `FlushDone()` | 实现 `dbctx.Flusher`，只拼脏列 |
-| `ResetToLoaded()` | 回到 last-loaded 快照（单对象回滚，不是事务回滚） |
-| `Insert()` | `INSERT ... RETURNING <pk>`，回填主键、`GetOrAddCachedRecord` 登记 |
+| `SnapshotState()` / `RestoreState()` | 整条实体快照；事务失败时由 `Transaction.Rollback` 恢复 |
+| `ResetNew()` | `Insert` 回滚后恢复成未加载状态（自增主键清零） |
+| `ResetToLoaded()` | 手动回到 last-loaded 快照；事务级回滚用 `Transaction.Rollback` |
+| `Insert()` | `INSERT ... RETURNING <pk>`；先 `RegisterNew`，回填主键后 `GetOrAddCachedRecord` |
 | `Update()` | 绕过 Transaction 的立即落库入口，生成代码内部不用 |
 
 改 `unique` 会改变生成的 API 形态（单行 ↔ 列表）。列表查询返回的元素在事务内都会登记进身份表；再对同一行单独 `GetById` 会返回列表里的同一个指针，不会产生第二个对象。
 
 ## 5. 已知缺口
 
-1. **`ResetToLoaded` 只回滚单个对象**：一次请求改多张表时没有 ctx 级的回滚日志，要回滚得自己按逆序处理（README todo）。
+1. **嵌套 savepoint / 部分回滚还没实现**：现在只有事务级 memento 回滚（`Transaction.Rollback`）；`ResetToLoaded` 保留给业务手动局部撤销。
 2. **咨询锁 key 的哈希问题**：`hashtext('user', uid)` 用两个 int 拼，uid 超过 int32 会出错；预想改成默认直接用 uid、其他业务锁用生成代码的枚举值（README todo）。
 3. **多咨询锁场景下的加锁/更新顺序**：见第 3 节，当前模型下不适用。
 4. **`QueryList` 的重复指针**：同一事务里如果列表查询返回了同一行多次，切片里的元素会是同一个指针；业务如果假定列表元素互不相同，需要自己去重。
 
 ## 6. 设计提案
 
-- **Procedure 与 Transaction 的职责划分与命名**：[design-procedure-transaction.md](design-procedure-transaction.md)（提案，未实施）。实施时并入本文正文，并在变更记录里留痕。
+- **Procedure 与 Transaction 的职责划分与命名**：[design-procedure-transaction.md](design-procedure-transaction.md)（提案，Phase 1-5 已实施）。实施时并入本文正文，并在变更记录里留痕。
 
 ## 7. 变更记录
+
+### 2026-10-20 增加事务级内存回滚（memento）
+
+- **改了什么**：`dbctx.Flusher` 增加 `SnapshotState` / `RestoreState` / `ResetNew`；`dbctx.Transaction` 增加 `RegisterNew` / `Rollback`；`WithTxPrepare` 在错误、panic、Flush 失败时先恢复内存对象；生成的 `Insert` 先 `RegisterNew`。
+- **为什么**：重试和共享缓存需要失败后内存状态与数据库一致；之前只有单对象 `ResetToLoaded`。
+- **影响范围**：错误 / panic / Flush 失败路径恢复对象；COMMIT 结果不确定时不回滚内存、不执行钩子；成功路径不变。嵌套 savepoint / 部分回滚仍未实现。
+- **验证状态**：`go build/vet/test` 通过；单元测试覆盖快照恢复、多对象、新建对象 `ResetNew`；真实 PG 集成测试覆盖加载后修改回滚、panic 回滚、Insert 回滚、AfterRollback 钩子看到恢复后的值、多对象回滚。
+- **未验证**：嵌套 savepoint / 部分回滚；重试尚未开启。
 
 ### 2026-10-20 增加 Procedure 统一入口
 

@@ -41,6 +41,22 @@ type RedEnvelope struct {
 	dirty             uint64
 }
 
+type redEnvelopeState struct {
+	id                int64
+	uid               int64
+	actId             int32
+	lastRefreshAt     int64
+	todayCount        int32
+	total             int32
+	loaded            bool
+	origUid           int64
+	origActId         int32
+	origLastRefreshAt int64
+	origTodayCount    int32
+	origTotal         int32
+	dirty             uint64
+}
+
 func NewRedEnvelope() *RedEnvelope {
 	return &RedEnvelope{}
 }
@@ -135,6 +151,48 @@ func (o *RedEnvelope) ResetToLoaded() {
 	o.todayCount = o.origTodayCount
 	o.total = o.origTotal
 	o.dirty = 0
+}
+
+func (v *RedEnvelope) SnapshotState() dbctx.RecordState {
+	return redEnvelopeState{
+		id:                v.id,
+		uid:               v.uid,
+		actId:             v.actId,
+		lastRefreshAt:     v.lastRefreshAt,
+		todayCount:        v.todayCount,
+		total:             v.total,
+		loaded:            v.loaded,
+		origUid:           v.origUid,
+		origActId:         v.origActId,
+		origLastRefreshAt: v.origLastRefreshAt,
+		origTodayCount:    v.origTodayCount,
+		origTotal:         v.origTotal,
+		dirty:             v.dirty,
+	}
+}
+
+func (v *RedEnvelope) RestoreState(state dbctx.RecordState) {
+	s := state.(redEnvelopeState)
+	v.id = s.id
+	v.uid = s.uid
+	v.actId = s.actId
+	v.lastRefreshAt = s.lastRefreshAt
+	v.todayCount = s.todayCount
+	v.total = s.total
+	v.loaded = s.loaded
+	v.origUid = s.origUid
+	v.origActId = s.origActId
+	v.origLastRefreshAt = s.origLastRefreshAt
+	v.origTodayCount = s.origTodayCount
+	v.origTotal = s.origTotal
+	v.dirty = s.dirty
+}
+
+// ResetNew 把 Insert 回滚后的对象恢复成"未加载"状态。
+func (v *RedEnvelope) ResetNew() {
+	v.id = 0
+	v.loaded = false
+	v.dirty = 0
 }
 
 // TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
@@ -366,6 +424,7 @@ func (o redEnvelope) Insert(
 	ctx context.Context,
 	v *RedEnvelope,
 ) {
+	dbctx.RegisterNew(ctx, v)
 	tx := dbctx.SQLTxFromCtx(ctx)
 	const query = "INSERT INTO \"user_red_envelope\" " +
 		"(uid, act_id, last_refresh_at, today_count, total) " +

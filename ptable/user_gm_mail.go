@@ -47,6 +47,26 @@ type GMMail struct {
 	dirty             uint64
 }
 
+type gMMailState struct {
+	id                int64
+	params            string
+	awardList         string
+	startAt           int64
+	endAt             int64
+	channel           string
+	userCreatedAt     int64
+	condition         string
+	loaded            bool
+	origParams        string
+	origAwardList     string
+	origStartAt       int64
+	origEndAt         int64
+	origChannel       string
+	origUserCreatedAt int64
+	origCondition     string
+	dirty             uint64
+}
+
 func NewGMMail() *GMMail {
 	return &GMMail{}
 }
@@ -171,6 +191,56 @@ func (o *GMMail) ResetToLoaded() {
 	o.userCreatedAt = o.origUserCreatedAt
 	o.condition = o.origCondition
 	o.dirty = 0
+}
+
+func (v *GMMail) SnapshotState() dbctx.RecordState {
+	return gMMailState{
+		id:                v.id,
+		params:            v.params,
+		awardList:         v.awardList,
+		startAt:           v.startAt,
+		endAt:             v.endAt,
+		channel:           v.channel,
+		userCreatedAt:     v.userCreatedAt,
+		condition:         v.condition,
+		loaded:            v.loaded,
+		origParams:        v.origParams,
+		origAwardList:     v.origAwardList,
+		origStartAt:       v.origStartAt,
+		origEndAt:         v.origEndAt,
+		origChannel:       v.origChannel,
+		origUserCreatedAt: v.origUserCreatedAt,
+		origCondition:     v.origCondition,
+		dirty:             v.dirty,
+	}
+}
+
+func (v *GMMail) RestoreState(state dbctx.RecordState) {
+	s := state.(gMMailState)
+	v.id = s.id
+	v.params = s.params
+	v.awardList = s.awardList
+	v.startAt = s.startAt
+	v.endAt = s.endAt
+	v.channel = s.channel
+	v.userCreatedAt = s.userCreatedAt
+	v.condition = s.condition
+	v.loaded = s.loaded
+	v.origParams = s.origParams
+	v.origAwardList = s.origAwardList
+	v.origStartAt = s.origStartAt
+	v.origEndAt = s.origEndAt
+	v.origChannel = s.origChannel
+	v.origUserCreatedAt = s.origUserCreatedAt
+	v.origCondition = s.origCondition
+	v.dirty = s.dirty
+}
+
+// ResetNew 把 Insert 回滚后的对象恢复成"未加载"状态。
+func (v *GMMail) ResetNew() {
+	v.id = 0
+	v.loaded = false
+	v.dirty = 0
 }
 
 // TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
@@ -393,6 +463,7 @@ func (o gMMail) Insert(
 	ctx context.Context,
 	v *GMMail,
 ) {
+	dbctx.RegisterNew(ctx, v)
 	tx := dbctx.SQLTxFromCtx(ctx)
 	const query = "INSERT INTO \"user_gm_mail\" " +
 		"(params, award_list, start_at, end_at, channel, user_created_at, condition) " +

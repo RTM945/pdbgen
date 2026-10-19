@@ -57,11 +57,12 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL �
 生成的结构体不是一个普通 ORM 实体，而是"当前值 + orig 快照 + dirty 位掩码"三件套（见 [ptable/user_red_envelope.go](ptable/user_red_envelope.go)）：
 
 - `SetXxx` 值没变就提前返回（不置脏位），变了就 `dirty |= 1<<n`；getter 只读当前值。生成器按 bean 字段顺序分配位，`UpdateFields` 决定哪些字段可以脏。
-- `TableName()` / `Identity()` / `FlushStmt()` / `FlushDone(rows)` 四个方法实现 `dbctx.Flusher`：`FlushStmt` 在 `dirty == 0` 或未 `loaded` 时返回空 query，否则按位拼出**只含脏列的 UPDATE**；`FlushDone` 回写 orig 快照、清 dirty，`rows == 0` 返回 `ErrXxxNotFound`；前两个给出行的身份（`Identity` 返回 0 表示主键未回填）。`ResetToLoaded()` 把实体回滚到快照。
+- `TableName()` / `Identity()` / `FlushStmt()` / `FlushDone(rows)` 实现 `dbctx.Flusher` 的落库部分：`FlushStmt` 在 `dirty == 0` 或未 `loaded` 时返回空 query，否则按位拼出**只含脏列的 UPDATE**；`FlushDone` 回写 orig 快照、清 dirty，`rows == 0` 返回 `ErrXxxNotFound`；前两个给出行的身份（`Identity` 返回 0 表示主键未回填）。`SnapshotState()` / `RestoreState()` / `ResetNew()` 提供事务失败时的整条实体快照和新建对象复位；`ResetToLoaded()` 只用于手动局部撤销。
 - 查询路径（`dbctx.QueryOne` / `QueryList`）在返回前调 `dbctx.GetOrAddCachedRecord` 把实体解析成当前事务的缓存记录；`Insert` 也走同一个入口。
 - **同一事务里一行只有一个缓存记录**：`Transaction.GetCachedRecord` / `AddCachedRecord` 按 `(TableName(), Identity())` 解析，命中就返回已有对象（对应 xdb 的 `getCachedTRecord` / `addCachedTRecord`）。生成的 `GetById` 会先查身份表，命中就不发 SELECT；唯一索引查询仍先查库再解析。`Identity()==0` 的对象不进身份表，`Insert` 回填主键后再登记；非事务路径不登记。细节见 [docs/design.md](docs/design.md)。
 - `dbpool.Transaction` 按 `AddCachedRecord` 的登记顺序、以指针去重收集实体，`Flush` 把所有脏 UPDATE 合并成一个 `pgx.Batch` 一次往返发出，再按顺序执行 `FlushDone`。任何一条失败即返回错误，由 `WithTx` 的 defer 回滚。所以业务代码只管 `SetXxx`，落库时机和合并都在提交前统一处理。
 - `Update` 是绕过 Transaction 的立即落库入口，生成代码内部不调用它。
+- 事务失败（错误 / panic / Flush 失败）时，`WithTxPrepare` 先 `Transaction.Rollback()` 恢复所有对象快照，再回滚 SQLTx，最后跑 AfterRollback；`Insert` 回滚走 `ResetNew`（自增主键清零、`loaded=false`）。COMMIT 结果不确定时不回滚内存，也不跑钩子。
 - 外部副作用（发包、RPC、事件）用 `dbctx.AfterCommit(ctx, fn)`，失败通知用 `dbctx.AfterRollback(ctx, fn)`。钩子同步执行、按注册顺序；`AfterCommit` 只在 COMMIT 明确成功后跑，COMMIT 返回错误时两个都不跑；钩子 ctx 不带事务和取消/超时。
 
 ### ctx 纪律：GetBy 与 SelectBy 互斥，用错就 panic
@@ -90,7 +91,7 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL �
 ## 已知缺口（README todo）
 
 - 咨询锁的 `hashtext` 拼接在 uid 超过 int32 时会出错，预想改成"默认用 uid、其他业务锁用枚举值"。
-- 一次请求涉及多表修改时，`ResetToLoaded` 只回滚单个实体，还没有 ctx 级别的回滚日志。
+- 只有事务级回滚；嵌套 savepoint / 部分回滚还没实现。重试尚未接入 `Procedure`。
 
 ## 参考实现
 

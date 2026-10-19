@@ -44,6 +44,24 @@ type Mail struct {
 	dirty         uint64
 }
 
+type mailState struct {
+	id            int64
+	uid           int64
+	confId        int32
+	state         int32
+	receiveAt     int64
+	params        string
+	awardList     string
+	loaded        bool
+	origUid       int64
+	origConfId    int32
+	origState     int32
+	origReceiveAt int64
+	origParams    string
+	origAwardList string
+	dirty         uint64
+}
+
 func NewMail() *Mail {
 	return &Mail{}
 }
@@ -153,6 +171,52 @@ func (o *Mail) ResetToLoaded() {
 	o.params = o.origParams
 	o.awardList = o.origAwardList
 	o.dirty = 0
+}
+
+func (v *Mail) SnapshotState() dbctx.RecordState {
+	return mailState{
+		id:            v.id,
+		uid:           v.uid,
+		confId:        v.confId,
+		state:         v.state,
+		receiveAt:     v.receiveAt,
+		params:        v.params,
+		awardList:     v.awardList,
+		loaded:        v.loaded,
+		origUid:       v.origUid,
+		origConfId:    v.origConfId,
+		origState:     v.origState,
+		origReceiveAt: v.origReceiveAt,
+		origParams:    v.origParams,
+		origAwardList: v.origAwardList,
+		dirty:         v.dirty,
+	}
+}
+
+func (v *Mail) RestoreState(state dbctx.RecordState) {
+	s := state.(mailState)
+	v.id = s.id
+	v.uid = s.uid
+	v.confId = s.confId
+	v.state = s.state
+	v.receiveAt = s.receiveAt
+	v.params = s.params
+	v.awardList = s.awardList
+	v.loaded = s.loaded
+	v.origUid = s.origUid
+	v.origConfId = s.origConfId
+	v.origState = s.origState
+	v.origReceiveAt = s.origReceiveAt
+	v.origParams = s.origParams
+	v.origAwardList = s.origAwardList
+	v.dirty = s.dirty
+}
+
+// ResetNew 把 Insert 回滚后的对象恢复成"未加载"状态。
+func (v *Mail) ResetNew() {
+	v.id = 0
+	v.loaded = false
+	v.dirty = 0
 }
 
 // TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
@@ -396,6 +460,7 @@ func (o mail) Insert(
 	ctx context.Context,
 	v *Mail,
 ) {
+	dbctx.RegisterNew(ctx, v)
 	tx := dbctx.SQLTxFromCtx(ctx)
 	const query = "INSERT INTO \"user_mail\" " +
 		"(uid, conf_id, state, receive_at, params, award_list) " +

@@ -130,12 +130,14 @@ func WithTxPrepare(ctx context.Context, prepare func(context.Context, pgx.Tx) er
 		runCtx := context.WithoutCancel(hookCtx)
 
 		if r := recover(); r != nil {
+			txn.Rollback()
 			_ = tx.Rollback(context.Background())
 			txn.runAfterRollback(runCtx)
 			panic(r)
 		}
 
 		if err != nil {
+			txn.Rollback()
 			_ = tx.Rollback(context.Background())
 			txn.runAfterRollback(runCtx)
 			return
@@ -143,6 +145,7 @@ func WithTxPrepare(ctx context.Context, prepare func(context.Context, pgx.Tx) er
 
 		// 所有业务执行完成后，按注册顺序 flush dirty object。
 		if err = txn.Flush(ctx); err != nil {
+			txn.Rollback()
 			_ = tx.Rollback(context.Background())
 			txn.runAfterRollback(runCtx)
 			return
@@ -158,7 +161,8 @@ func WithTxPrepare(ctx context.Context, prepare func(context.Context, pgx.Tx) er
 		// 下面的 Rollback 兜底。
 		// Commit 返回错误时结果不确定：可能已经提交，也可能没有。
 		// 这时候两个钩子都不能跑——跑 after-commit 可能在未提交时发包，
-		// 跑 after-rollback 可能在已提交时发失败通知。只把错误交给调用方。
+		// 跑 after-rollback 可能在已提交时发失败通知。内存对象也不回滚：
+		// 同样无法判断这批修改是否已经落库，交给调用方丢弃或按策略处理。
 		if err = tx.Commit(context.WithoutCancel(ctx)); err != nil {
 			return
 		}

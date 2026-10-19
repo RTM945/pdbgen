@@ -36,6 +36,17 @@ type {{ .TypeName }} struct {
 	dirty uint64
 }
 
+type {{ .ReceiverName }}State struct {
+{{- range .Fields }}
+	{{ .Name }} {{ .GoType }}
+{{- end }}
+	loaded bool
+{{- range .UpdateFields }}
+	orig{{ .MethodName }} {{ .GoType }}
+{{- end }}
+	dirty uint64
+}
+
 func New{{ .TypeName }}() *{{ .TypeName }} {
 	return &{{ .TypeName }}{}
 }
@@ -81,6 +92,40 @@ func (o *{{ .TypeName }}) ResetToLoaded() {
 	o.{{ .Name }} = o.orig{{ .MethodName }}
 {{- end }}
 	o.dirty = 0
+}
+
+func (v *{{ .TypeName }}) SnapshotState() dbctx.RecordState {
+	return {{ .ReceiverName }}State{
+{{- range .Fields }}
+		{{ .Name }}: v.{{ .Name }},
+{{- end }}
+		loaded: v.loaded,
+{{- range .UpdateFields }}
+		orig{{ .MethodName }}: v.orig{{ .MethodName }},
+{{- end }}
+		dirty: v.dirty,
+	}
+}
+
+func (v *{{ .TypeName }}) RestoreState(state dbctx.RecordState) {
+	s := state.({{ .ReceiverName }}State)
+{{- range .Fields }}
+	v.{{ .Name }} = s.{{ .Name }}
+{{- end }}
+	v.loaded = s.loaded
+{{- range .UpdateFields }}
+	v.orig{{ .MethodName }} = s.orig{{ .MethodName }}
+{{- end }}
+	v.dirty = s.dirty
+}
+
+// ResetNew 把 Insert 回滚后的对象恢复成"未加载"状态。
+func (v *{{ .TypeName }}) ResetNew() {
+{{- if .AutoIncrement }}
+	v.{{ .PK.Name }} = 0
+{{- end }}
+	v.loaded = false
+	v.dirty = 0
 }
 
 // TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
@@ -280,6 +325,7 @@ func (o {{ .ReceiverName }}) Insert(
 	ctx context.Context,
 	v *{{ .TypeName }},
 ) {
+	dbctx.RegisterNew(ctx, v)
 	tx := dbctx.SQLTxFromCtx(ctx)
 	const query =
 		"INSERT INTO {{ quote .TableName }} " +

@@ -32,19 +32,32 @@ type Scanner interface {
 	Scan(dest ...any) error
 }
 
+// RecordState 是生成代码的整条实体快照（字段值 + orig + dirty + id + loaded）。
+// 运行时只负责保存和回传，不关心里面的字段。
+type RecordState any
+
 // Flusher 是可以被 Transaction 收集、在事务提交前批量落库的对象。
 // FlushStmt 返回空 query 表示这个对象没有被修改过，无需落库。
 // FlushDone 在对应语句执行成功后回调，用来同步 orig 状态、清 dirty，
 // 并根据受影响行数判断这一行是否还存在。
 //
-// TableName 和 Identity 一起给出一行的身份，Transaction 用它们检测"同一个事务里
-// 有两个对象指向同一行"——那会导致两条 UPDATE 各写各的、后写的静默覆盖先写的。
+// TableName 和 Identity 一起给出一行的身份，Transaction 用它们把同一行解析到
+// 同一个缓存记录（xdb: getCachedTRecord / addCachedTRecord）。
 // 主键自增且还没回填（Insert 之前）时 Identity 返回 0，表示这个对象还没有身份。
 type Flusher interface {
 	TableName() string
 	Identity() int64
 	FlushStmt() (query string, args []any)
 	FlushDone(rowsAffected int64) error
+
+	// SnapshotState 返回整条实体的快照，用于事务失败时恢复内存状态。
+	SnapshotState() RecordState
+
+	// RestoreState 用 SnapshotState 返回的快照恢复实体。
+	RestoreState(state RecordState)
+
+	// ResetNew 把 Insert 回滚后的新对象恢复成"未加载"状态。
+	ResetNew()
 }
 
 // Transaction 是一次业务事务的工作集：身份表、脏对象、回滚和提交后任务。
@@ -56,6 +69,12 @@ type Transaction interface {
 	// AddCachedRecord 把记录放进事务缓存并返回规范记录
 	// （对应 xdb 的 addCachedTRecord）。同一行已经有记录时返回已有记录。
 	AddCachedRecord(obj Flusher) Flusher
+
+	// RegisterNew 在 Insert 之前登记新建实体，回滚时恢复为未加载状态。
+	RegisterNew(obj Flusher)
+
+	// Rollback 恢复本次事务内所有缓存记录的快照。
+	Rollback()
 
 	// AfterCommit 注册 COMMIT 明确成功后执行的任务。
 	AfterCommit(fn func(context.Context))
@@ -105,6 +124,19 @@ func TransactionFromCtxOptional(ctx context.Context) (Transaction, bool) {
 		return nil, false
 	}
 	return value.(Transaction), true
+}
+
+// RegisterNew 在 Insert 之前把实体登记为"新建"，回滚时调用 ResetNew。
+// 没有事务时是空操作（Insert 本身会因为没有 SQLTx 而失败）。
+func RegisterNew(ctx context.Context, obj Flusher) {
+	if obj == nil {
+		return
+	}
+	txn, ok := TransactionFromCtxOptional(ctx)
+	if !ok {
+		return
+	}
+	txn.RegisterNew(obj)
 }
 
 // AfterCommit 把 fn 注册到当前事务，在 COMMIT 明确成功后执行。
