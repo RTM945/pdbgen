@@ -85,7 +85,33 @@ b.SetTotal(42)
 
 **已知限制**：框架一次只挂一把锁，多把锁的获取顺序由业务自己保证；行的 UPDATE 顺序 = 对象注册顺序（首次查询顺序），一次事务锁多把锁时这个顺序会参与死锁判定。当前"一次事务一个 uid 一把锁"的模型下不存在这个问题。
 
-### 3.1 提交后 / 回滚后任务
+### 3.1 Procedure 入口
+
+`dbpool.Procedure(ctx, opts, fn)` 是所有事务入口的统一形式：
+
+```go
+type ProcedureOptions struct {
+    Lock    LockSpec      // 零值 = 不加锁
+    Timeout time.Duration // <=0 表示只用 pdb.xml 的 transactionTimeoutMs
+}
+
+func Procedure(ctx context.Context, opts ProcedureOptions, fn func(context.Context) error) error
+```
+
+锁用构造器生成：
+
+```go
+Procedure(ctx, ProcedureOptions{Lock: TryAdvisoryLock(uid)}, fn)       // 单 key，try
+Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock(uid)}, fn)          // 单 key，阻塞
+Procedure(ctx, ProcedureOptions{Lock: TryAdvisoryLock2(ns, id)}, fn)   // 双 int32，try
+Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 int32，阻塞
+```
+
+- `Timeout` 与 `transactionTimeoutMs` 同时生效时取更早到期的那个；COMMIT 仍然用 `WithoutCancel`，不受这个预算影响。
+- Phase 4 不做重试：`fn` 只执行一次。重试需要内存回滚（memento），等 Phase 5 再加。
+- `WithTx` / `WithTryAdvisoryLock*` / `WithAdvisoryLock*` 保留为薄封装，底层都走 `Procedure`；`WithTxPrepare` 是 `Procedure` 的底层实现，需要自定义 `prepare` 钩子时直接用它。
+
+### 3.2 提交后 / 回滚后任务
 
 `dbctx.AfterCommit(ctx, fn)` / `dbctx.AfterRollback(ctx, fn)` 把任务挂到当前事务：
 
@@ -128,6 +154,14 @@ b.SetTotal(42)
 - **Procedure 与 Transaction 的职责划分与命名**：[design-procedure-transaction.md](design-procedure-transaction.md)（提案，未实施）。实施时并入本文正文，并在变更记录里留痕。
 
 ## 7. 变更记录
+
+### 2026-10-20 增加 Procedure 统一入口
+
+- **改了什么**：新增 `dbpool.Procedure(ctx, ProcedureOptions, fn)`、`ProcedureOptions`、`LockSpec` 和四个锁构造器；`WithTx` / 四个 `With*Lock*` 改为 `Procedure` 的薄封装；`ProcedureOptions.Timeout` 可以给单次 Procedure 加预算。
+- **为什么**：把事务入口、锁、超时收敛到一个 xdb 风格的 `Procedure`；以后加重试时只需要改这一处。
+- **影响范围**：现有入口行为不变；Phase 4 不重试，`fn` 仍然只执行一次；`Timeout` 与全局预算取更早；COMMIT 不受预算影响。
+- **验证状态**：`go build/vet/test` 通过；真实 PG 集成测试覆盖 try 锁冲突、Timeout 体现在 ctx deadline、旧 `WithTryAdvisoryLock` 薄封装。
+- **未验证**：阻塞锁的等待/超时行为依赖 `lock_timeout`，没有单独测试；重试未实现。
 
 ### 2026-10-20 引入事务级缓存记录（身份表）
 

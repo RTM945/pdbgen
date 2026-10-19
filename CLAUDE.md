@@ -75,11 +75,11 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL �
 
 ### 事务与咨询锁（[dbpool/dbpool.go](dbpool/dbpool.go)）
 
-`WithTxPrepare(ctx, prepare, fn)` 是所有事务入口的公共实现：解析连接 → `Begin` → 把 tx 包装成带 SQL 日志的 `dbctx.SQLTx` 放进 ctx（`WithSQLTx`）→ 创建 Transaction 放进 ctx（`WithTransaction`）→ 执行 `prepare` 钩子 → 执行 `fn` → defer 里按"panic 回滚 / 有错回滚 / flush / commit"的顺序收尾，提交成功后执行 AfterCommit、回滚后执行 AfterRollback。
+`dbpool.Procedure(ctx, ProcedureOptions{Lock, Timeout}, fn)` 是事务的统一入口：可选地给 ctx 加单次预算 → `WithTxPrepare` 解析连接 → `Begin` → 把 tx 包装成带 SQL 日志的 `dbctx.SQLTx` 放进 ctx（`WithSQLTx`）→ 创建 Transaction 放进 ctx（`WithTransaction`）→ 执行锁的 `prepare` 钩子 → 执行 `fn` → defer 里按"panic 回滚 / 有错回滚 / flush / commit"的顺序收尾，提交成功后执行 AfterCommit、回滚后执行 AfterRollback。`WithTxPrepare` 是底层实现，需要自定义 `prepare` 时直接用它。
 
 - 事务总预算由 `transactionTimeoutMs` 控制（`statement_timeout` 只管单条语句，PG 17 之前没有事务级 GUC），COMMIT 用 `context.WithoutCancel(ctx)`：一旦发出去就必须等到结果，避免"不知道到底提交没有"导致重试重复发放。
 - `prepare` 钩子里用 `SET LOCAL` 下发 `statement_timeout`、`idle_in_transaction_session_timeout`、`lock_timeout`，然后拿咨询锁。
-- 四个锁入口：`WithTryAdvisoryLock(key)` / `WithTryAdvisoryLock2(ns, id)` 拿不到返回 `ErrAdvisoryLockNotAcquired`；`WithAdvisoryLock` / `WithAdvisoryLock2` 会阻塞等待。单 bigint 与双 int32 的内置签名差异由 `lockArgs` 抽象（`lockKey` / `lockKey2`）处理，key 的语义框架不关心。
+- 锁用 `ProcedureOptions.Lock` 指定：`TryAdvisoryLock(key)` / `TryAdvisoryLock2(ns, id)` 拿不到返回 `ErrAdvisoryLockNotAcquired`；`AdvisoryLock(key)` / `AdvisoryLock2(ns, id)` 会阻塞等待。旧的 `WithTryAdvisoryLock` / `WithAdvisoryLock*` 是 `Procedure` 的薄封装。单 bigint 与双 int32 的内置签名差异由 `lockArgs` 抽象（`lockKey` / `lockKey2`）处理，key 的语义框架不关心。
 - 这套锁是用来替代 `SELECT ... FOR UPDATE` 做玩家级串行的（README 有说明：玩家请求用 try 版，GM/RPC 写请求用阻塞版，只读请求走非事务的 `Query`）。
 - 连接池是包级变量，`Init` 每进程调一次；`Close` 必须排在服务优雅关闭**之后**，否则会把在途请求打死在半路。`DefaultQueryExecMode` 被设成 `pgx.QueryExecModeExec`（简单协议），配合 pgBouncer 的 transaction pooling。
 

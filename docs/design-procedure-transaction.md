@@ -1,6 +1,6 @@
 # Procedure 与 Transaction：职责划分与命名（设计提案）
 
-> 状态：提案，Phase 1（命名迁移）、Phase 2（AfterCommit / AfterRollback）、Phase 3（身份表）已实施；其余阶段未实施。
+> 状态：提案，Phase 1（命名迁移）、Phase 2（AfterCommit / AfterRollback）、Phase 3（身份表）、Phase 4（Procedure 入口）已实施；其余阶段未实施。
 > 参考实现：`C:\Dev\xdb.jar.src1`（xdb）的 `Procedure` / `Transaction` / `Savepoint`。
 > 实施时：同步修改 [design.md](design.md)，并在它的"变更记录"里留痕。
 
@@ -15,7 +15,7 @@ pdbgen 原来有两个层面的"事务"，但名字没有体现出来：
 
 ## 2. 命名结论
 
-- **Procedure**：一次业务事务（入口、锁、超时、重试、提交/回滚后任务）。对应 xdb 的 `Procedure`，对应今天 `WithTxPrepare` 的入口 + 回调。
+- **Procedure**：一次业务事务（入口、锁、超时、重试、提交/回滚后任务）。对应 xdb 的 `Procedure`，对应今天 `dbpool.Procedure` 的入口 + 回调。
 - **Transaction**：事务内工作集（原 `UnitOfWork`）：身份表、脏对象、savepoint/回滚、提交/回滚后任务。对应 xdb 的 `Transaction` + `Savepoint`。
 - **SQLTx**：数据库事务（原 `dbctx.TX`）：执行 SQL、提交/回滚。对应 pgx.Tx。
 - **Flusher**：可落库实体。对应 xdb 的 `TRecord`。
@@ -73,16 +73,16 @@ Procedure.call()                         Procedure.java:213
 
 ### 3.2 pdbgen 的现状与目标
 
-| 概念 | 现状（Phase 3 后） | 目标 |
+| 概念 | 现状（Phase 4 后） | 目标 |
 |---|---|---|
-| 业务事务 | `WithTxPrepare` + 回调 | `Procedure` |
+| 业务事务 | `dbpool.Procedure`（锁 / 超时）+ 回调 | 增加重试 |
 | 内存工作集 | `dbpool.Transaction`：身份表 + 脏对象 + 提交后任务 | 增加内存回滚 / savepoint |
 | SQL 事务 | `dbctx.SQLTx` | 不变 |
 | 实体 | 生成结构体 + `Flusher` | 不变 |
 
-- `WithTxPrepare` 同时承担事务入口、工作集创建、flush、commit/rollback。
+- `Procedure` 负责入口、锁和单次预算；`WithTxPrepare` 负责底层的 Begin、flush、commit/rollback。
 - `Transaction.GetCachedRecord` / `AddCachedRecord` 解析身份表，`Flush` 在提交前批量发 UPDATE。
-- 已经有身份表和提交后任务；还没有内存回滚 / savepoint。
+- 已经有身份表、提交后任务和统一入口；还没有内存回滚 / savepoint / 重试。
 
 ### 3.3 目标职责
 
@@ -222,16 +222,22 @@ Procedure(ctx, opts, fn)
 
 ```go
 type ProcedureOptions struct {
-    Lock    LockSpec      // 单 key / 双 key / try / block
-    Retry   RetryPolicy   // 可重试错误、次数、退避
-    Timeout time.Duration
+    Lock    LockSpec      // 零值 = 不加锁
+    Timeout time.Duration // <=0 表示只用 transactionTimeoutMs
 }
 
 func Procedure(ctx context.Context, opts ProcedureOptions, fn func(context.Context) error) error
+
+// 锁构造器
+TryAdvisoryLock(key int64) LockSpec
+AdvisoryLock(key int64) LockSpec
+TryAdvisoryLock2(ns, id int32) LockSpec
+AdvisoryLock2(ns, id int32) LockSpec
 ```
 
 - 底层复用 `WithTxPrepare`。
 - `WithTx` / `WithTryAdvisoryLock*` / `WithAdvisoryLock*` 保留为薄封装，避免一次性改所有调用点。
+- **Retry 推迟到 Phase 5**：重试必须先把内存状态回滚干净，所以和 memento 一起做；Phase 4 的 `fn` 只执行一次。
 - 如果保留嵌套语义，嵌套 `Procedure` 自动创建 savepoint；不需要嵌套时，Phase 5 只做 Procedure 级回滚，savepoint API 延后。
 
 ### 7.2 Transaction 接口
@@ -256,10 +262,12 @@ type Transaction interface {
 }
 ```
 
-`GetOrAddCachedRecord` 是 `getCachedTRecord` + `addCachedTRecord` 的组合入口：
+`GetOrAddCachedRecord` 是 `getCachedTRecord` + `addCachedTRecord` 的组合入口；
+`GetCachedRecordAs` 是缓存优先查询的泛型入口（生成代码的 `GetById` 用它）：
 
 ```go
 func GetOrAddCachedRecord[T Flusher](ctx context.Context, obj T) T
+func GetCachedRecordAs[T Flusher](ctx context.Context, tableName string, id int64) (T, bool)
 ```
 
 `QueryOne` / `QueryList` 用返回值替换扫描出来的对象。这样"同一行一个对象"从 panic 守卫变成身份表保证。
@@ -267,6 +275,8 @@ func GetOrAddCachedRecord[T Flusher](ctx context.Context, obj T) T
 ### 7.3 生成代码变化
 
 - `QueryOne` / `QueryList`：`obj = dbctx.GetOrAddCachedRecord(ctx, obj)`。
+- `GetById`：先 `dbctx.GetCachedRecordAs[*Xxx]`，命中直接返回，不发 SELECT；未命中才走原查询。
+- 唯一索引查询（`GetByYyy`）仍先查库，再靠 `GetOrAddCachedRecord` 解析成已有对象。
 - 新增 `SnapshotState()` / `RestoreState()` / `ResetNew()`。
 - `Insert` 在发 SQL 前 `TrackNew`（identity=0、loaded=false），成功后回填主键并更新身份表；回滚时 `ResetNew`。
 - `FlushStmt` / `FlushDone` 暂不变。
@@ -278,8 +288,8 @@ func GetOrAddCachedRecord[T Flusher](ctx context.Context, obj T) T
 | 0 | 安全网：跑通现有测试，补齐事务/回滚/重复行用例；代码不动 | `go test ./...` 全绿；无 PG 时 skip |
 | 1 | **已完成**。命名迁移：`TX→SQLTx`、`UnitOfWork→Transaction`；保留 Deprecated 别名；改模板并重新生成 `ptable/*.go` | `go build/vet/test` 全绿；行为无变化 |
 | 2 | **已完成**。AfterCommit / AfterRollback；不碰生成实体 | 提交后可见、回滚不触发、panic 路径、hook panic 不影响其他 hook |
-| 3 | **已完成**。Transaction 身份表（`GetCachedRecord` / `AddCachedRecord`）；`GetOrAddCachedRecord` 返回规范对象；移除重复行 panic | 单元测试 + 真实 PG 的"同事务两次查询返回同一指针"测试 |
-| 4 | `Procedure` 入口（锁/超时）；先不做重试 | 锁参数和超时行为与现有 `With*Lock*` 一致 |
+| 3 | **已完成**。Transaction 身份表（`GetCachedRecord` / `AddCachedRecord`）；`GetOrAddCachedRecord` 返回规范对象；`GetById` 缓存优先；移除重复行 panic | 单元测试 + 真实 PG 的"同事务两次查询返回同一指针、第二次 GetById 不发 SELECT"测试 |
+| 4 | **已完成**。`Procedure` 入口（锁/超时）；先不做重试 | 锁参数和超时行为与现有 `With*Lock*` 一致 |
 | 5 | 整事务 memento 回滚 + `ResetNew`；嵌套 savepoint 可选。触发条件：加重试或共享缓存 | 多表修改回滚测试；Insert 后回滚测试 |
 | 6 | （可选）Persister / write-behind，与 Procedure 解耦 | 独立设计，不在本文范围 |
 
@@ -294,7 +304,7 @@ func GetOrAddCachedRecord[T Flusher](ctx context.Context, obj T) T
 1. **重复行解析**：身份表命中后直接返回已有对象，不再 panic；design.md 2.1 / 2.2 已经改写并留了变更记录。事务级身份表同时承担去重和 read-your-writes，后续内存回滚也会以它为边界。
 2. **Flush 时机**：Phase 1-5 不变，仍在 COMMIT 前同步 Flush；Phase 6 才讨论异步。
 3. **错误传播**：保持 panic 传播；Procedure 只捕获可重试错误，其他错误原样抛出。
-4. **重试与副作用**：`fn` 可能被执行多次；所有对外副作用必须走 `AfterCommit`，否则重试会重复。
+4. **重试与副作用**：目前 `fn` 只执行一次；Phase 5 开启重试后 `fn` 可能被执行多次，所有对外副作用必须走 `AfterCommit`，否则重试会重复。
 5. **锁顺序**：Procedure 仍然只挂一把锁；多锁场景由业务保证顺序，与 design.md 第 3 节一致。
 6. **身份表的作用域**：Transaction 是事务级的，不跨事务；跨请求共享对象属于 write-behind/会话工作集，不在本提案范围内。
 7. **业务失败语义**：校验不通过返回错误，由 Procedure 整体回滚；业务不要在事务内 `recover` 后继续。参考 `RedPackRainRole.click()`：校验前置，失败直接返回 false。

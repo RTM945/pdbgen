@@ -98,7 +98,7 @@ func Query(ctx context.Context, fn func(context.Context) error) error {
 }
 
 func WithTx(ctx context.Context, fn func(context.Context) error) error {
-	return WithTxPrepare(ctx, nil, fn)
+	return Procedure(ctx, ProcedureOptions{}, fn)
 }
 
 func WithTxPrepare(ctx context.Context, prepare func(context.Context, pgx.Tx) error, fn func(context.Context) error) (err error) {
@@ -178,46 +178,23 @@ func WithTxPrepare(ctx context.Context, prepare func(context.Context, pgx.Tx) er
 // WithTryAdvisoryLock 使用单 bigint 形式的咨询锁，拿不到锁直接返回。
 // key 的含义由调用方决定，框架不关心。
 func WithTryAdvisoryLock(ctx context.Context, key int64, fn func(context.Context) error) error {
-	return WithTxPrepare(
-		ctx,
-		func(ctx context.Context, tx pgx.Tx) error {
-			return prepare(ctx, tx, true, lockKey(key))
-		},
-		fn,
-	)
+	return Procedure(ctx, ProcedureOptions{Lock: TryAdvisoryLock(key)}, fn)
 }
 
 // WithTryAdvisoryLock2 使用双 int32 形式的咨询锁，拿不到锁直接返回。
 // ns/id 的含义由调用方决定，框架不关心。
 func WithTryAdvisoryLock2(ctx context.Context, ns, id int32, fn func(context.Context) error) error {
-	return WithTxPrepare(
-		ctx,
-		func(ctx context.Context, tx pgx.Tx) error {
-			return prepare(ctx, tx, true, lockKey2{ns: ns, id: id})
-		},
-		fn,
-	)
+	return Procedure(ctx, ProcedureOptions{Lock: TryAdvisoryLock2(ns, id)}, fn)
 }
 
-// WithAdvisoryLock 拿不到锁时会阻塞
+// WithAdvisoryLock 拿不到锁时会阻塞。
 func WithAdvisoryLock(ctx context.Context, key int64, fn func(context.Context) error) error {
-	return WithTxPrepare(
-		ctx,
-		func(ctx context.Context, tx pgx.Tx) error {
-			return prepare(ctx, tx, false, lockKey(key))
-		},
-		fn,
-	)
+	return Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock(key)}, fn)
 }
 
+// WithAdvisoryLock2 拿不到锁时会阻塞。
 func WithAdvisoryLock2(ctx context.Context, ns, id int32, fn func(context.Context) error) error {
-	return WithTxPrepare(
-		ctx,
-		func(ctx context.Context, tx pgx.Tx) error {
-			return prepare(ctx, tx, false, lockKey2{ns: ns, id: id})
-		},
-		fn,
-	)
+	return Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)
 }
 
 type lockArgs interface {

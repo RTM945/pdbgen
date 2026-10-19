@@ -1,0 +1,98 @@
+package dbpool
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
+
+// TestProcedureTryLockConflict 第一个 Procedure 持有阻塞锁时，
+// 第二个 Procedure 的 try 锁应该立刻返回 ErrAdvisoryLockNotAcquired。
+func TestProcedureTryLockConflict(t *testing.T) {
+	setupTestDB(t)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	key := time.Now().UnixNano()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	firstDone := make(chan error, 1)
+
+	go func() {
+		firstDone <- Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock(key)}, func(ctx context.Context) error {
+			close(started)
+			select {
+			case <-release:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+	}()
+
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("第一个 Procedure 没能启动")
+	}
+
+	var secondCalled bool
+	err := Procedure(ctx, ProcedureOptions{Lock: TryAdvisoryLock(key)}, func(context.Context) error {
+		secondCalled = true
+		return nil
+	})
+
+	if secondCalled {
+		close(release)
+		<-firstDone
+		t.Fatal("拿不到锁时业务函数不应该执行")
+	}
+	if !errors.Is(err, ErrAdvisoryLockNotAcquired) {
+		close(release)
+		<-firstDone
+		t.Fatalf("期望 ErrAdvisoryLockNotAcquired，实际: %v", err)
+	}
+
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("第一个 Procedure 失败: %v", err)
+	}
+}
+
+// TestProcedureAppliesTimeout ProcedureOptions.Timeout 应该体现在传给业务的 ctx 上。
+func TestProcedureAppliesTimeout(t *testing.T) {
+	setupTestDB(t)
+
+	var gotDeadline bool
+	err := Procedure(t.Context(), ProcedureOptions{Timeout: time.Second}, func(ctx context.Context) error {
+		deadline, ok := ctx.Deadline()
+		gotDeadline = ok && time.Until(deadline) > 0 && time.Until(deadline) <= time.Second
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Procedure 失败: %v", err)
+	}
+	if !gotDeadline {
+		t.Fatal("ProcedureOptions.Timeout 应该体现在 ctx 的 deadline 上")
+	}
+}
+
+// TestWithTryAdvisoryLockStillWorks 旧的 With*Lock* 入口保留为薄封装，
+// 行为与 Procedure 一致。
+func TestWithTryAdvisoryLockStillWorks(t *testing.T) {
+	setupTestDB(t)
+
+	key := time.Now().UnixNano()
+	var called bool
+	if err := WithTryAdvisoryLock(t.Context(), key, func(context.Context) error {
+		called = true
+		return nil
+	}); err != nil {
+		t.Fatalf("WithTryAdvisoryLock 失败: %v", err)
+	}
+	if !called {
+		t.Fatal("WithTryAdvisoryLock 应该执行回调")
+	}
+}
