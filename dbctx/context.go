@@ -17,7 +17,7 @@ type Querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-type DB interface {
+type TX interface {
 	Querier
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults
@@ -52,16 +52,16 @@ func HasTx(ctx context.Context) bool {
 	return ctx.Value(txKey{}) != nil
 }
 
-func TxFromCtx(ctx context.Context) DB {
-	return ctx.Value(txKey{}).(DB)
+func TxFromCtx(ctx context.Context) TX {
+	return ctx.Value(txKey{}).(TX)
 }
 
-func TxFromCtxOptional(ctx context.Context) (DB, bool) {
+func TxFromCtxOptional(ctx context.Context) (TX, bool) {
 	res := ctx.Value(txKey{})
 	if res == nil {
 		return nil, false
 	}
-	return res.(DB), true
+	return res.(TX), true
 }
 
 func QuerierFromCtx(ctx context.Context) Querier {
@@ -71,7 +71,7 @@ func QuerierFromCtx(ctx context.Context) Querier {
 	return ctx.Value(querierKey{}).(Querier)
 }
 
-func WithTx(ctx context.Context, tx DB) context.Context {
+func WithTx(ctx context.Context, tx TX) context.Context {
 	return context.WithValue(ctx, txKey{}, tx)
 }
 
