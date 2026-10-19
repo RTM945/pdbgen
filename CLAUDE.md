@@ -62,6 +62,7 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL �
 - **同一事务里一行只允许有一个对象**：`Transaction.Register` 按 `(TableName(), Identity())` 检测，撞上就 panic（"后写的会静默覆盖先写的"）。它挡的是"同一行查两次 → 两个对象 → 两条 UPDATE 各写各的"这个唯一会静默丢数据的场景；检测在注册时触发、不看对象脏不脏，非事务路径不登记也不检测。这是使用约定 + 守卫，不是自动合并——业务代码应该复用第一次查出来的对象。细节见 [docs/design.md](docs/design.md)。
 - `dbpool.Transaction` 按注册顺序、以指针去重收集实体，`Flush` 把所有脏 UPDATE 合并成一个 `pgx.Batch` 一次往返发出，再按顺序执行 `FlushDone`。任何一条失败即返回错误，由 `WithTx` 的 defer 回滚。所以业务代码只管 `SetXxx`，落库时机和合并都在提交前统一处理。
 - `Update` 是绕过 Transaction 的立即落库入口，生成代码内部不调用它。
+- 外部副作用（发包、RPC、事件）用 `dbctx.AfterCommit(ctx, fn)`，失败通知用 `dbctx.AfterRollback(ctx, fn)`。钩子同步执行、按注册顺序；`AfterCommit` 只在 COMMIT 明确成功后跑，COMMIT 返回错误时两个都不跑；钩子 ctx 不带事务和取消/超时。
 
 ### ctx 纪律：GetBy 与 SelectBy 互斥，用错就 panic
 
@@ -74,7 +75,7 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL �
 
 ### 事务与咨询锁（[dbpool/dbpool.go](dbpool/dbpool.go)）
 
-`WithTxPrepare(ctx, prepare, fn)` 是所有事务入口的公共实现：解析连接 → `Begin` → 把 tx 包装成带 SQL 日志的 `dbctx.SQLTx` 放进 ctx（`WithSQLTx`）→ 创建 Transaction 放进 ctx（`WithTransaction`）→ 执行 `prepare` 钩子 → 执行 `fn` → defer 里按"panic 回滚 / 有错回滚 / flush / commit"的顺序收尾。
+`WithTxPrepare(ctx, prepare, fn)` 是所有事务入口的公共实现：解析连接 → `Begin` → 把 tx 包装成带 SQL 日志的 `dbctx.SQLTx` 放进 ctx（`WithSQLTx`）→ 创建 Transaction 放进 ctx（`WithTransaction`）→ 执行 `prepare` 钩子 → 执行 `fn` → defer 里按"panic 回滚 / 有错回滚 / flush / commit"的顺序收尾，提交成功后执行 AfterCommit、回滚后执行 AfterRollback。
 
 - 事务总预算由 `transactionTimeoutMs` 控制（`statement_timeout` 只管单条语句，PG 17 之前没有事务级 GUC），COMMIT 用 `context.WithoutCancel(ctx)`：一旦发出去就必须等到结果，避免"不知道到底提交没有"导致重试重复发放。
 - `prepare` 钩子里用 `SET LOCAL` 下发 `statement_timeout`、`idle_in_transaction_session_timeout`、`lock_timeout`，然后拿咨询锁。

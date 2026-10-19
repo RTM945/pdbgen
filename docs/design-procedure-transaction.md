@@ -1,6 +1,6 @@
 # Procedure 与 Transaction：职责划分与命名（设计提案）
 
-> 状态：提案，Phase 1（命名迁移）已实施；其余阶段未实施。
+> 状态：提案，Phase 1（命名迁移）、Phase 2（AfterCommit / AfterRollback）已实施；其余阶段未实施。
 > 参考实现：`C:\Dev\xdb.jar.src1`（xdb）的 `Procedure` / `Transaction` / `Savepoint`。
 > 实施时：同步修改 [design.md](design.md)，并在它的"变更记录"里留痕。
 
@@ -273,7 +273,7 @@ func Track[T Flusher](ctx context.Context, obj T) T
 |---|---|---|
 | 0 | 安全网：跑通现有测试，补齐事务/回滚/重复行用例；代码不动 | `go test ./...` 全绿；无 PG 时 skip |
 | 1 | **已完成**。命名迁移：`TX→SQLTx`、`UnitOfWork→Transaction`；保留 Deprecated 别名；改模板并重新生成 `ptable/*.go` | `go build/vet/test` 全绿；行为无变化 |
-| 2 | AfterCommit / AfterRollback；不碰生成实体 | 提交后可见、回滚不触发、panic 路径、hook panic 不影响其他 hook |
+| 2 | **已完成**。AfterCommit / AfterRollback；不碰生成实体 | 提交后可见、回滚不触发、panic 路径、hook panic 不影响其他 hook |
 | 3 | Transaction 身份表；`Track` 返回规范对象；重复行 panic 保留为兜底 | 现有测试 + "同事务两次查询返回同一指针"测试 |
 | 4 | `Procedure` 入口（锁/超时）；先不做重试 | 锁参数和超时行为与现有 `With*Lock*` 一致 |
 | 5 | 整事务 memento 回滚 + `ResetNew`；嵌套 savepoint 可选。触发条件：加重试或共享缓存 | 多表修改回滚测试；Insert 后回滚测试 |

@@ -50,6 +50,12 @@ type Flusher interface {
 // 它由 Procedure 创建，随 Procedure 结束而销毁；SQL 事务本身见 SQLTx。
 type Transaction interface {
 	Register(obj Flusher)
+
+	// AfterCommit 注册 COMMIT 明确成功后执行的任务。
+	AfterCommit(fn func(context.Context))
+
+	// AfterRollback 注册事务回滚后执行的任务。
+	AfterRollback(fn func(context.Context))
 }
 
 func HasSQLTx(ctx context.Context) bool {
@@ -85,6 +91,46 @@ func WithQuerier(ctx context.Context, q Querier) context.Context {
 
 func WithTransaction(ctx context.Context, txn Transaction) context.Context {
 	return context.WithValue(ctx, transactionKey{}, txn)
+}
+
+func TransactionFromCtxOptional(ctx context.Context) (Transaction, bool) {
+	value := ctx.Value(transactionKey{})
+	if value == nil {
+		return nil, false
+	}
+	return value.(Transaction), true
+}
+
+// AfterCommit 把 fn 注册到当前事务，在 COMMIT 明确成功后执行。
+// 没有事务时立即执行：没有提交点需要等待。
+//
+// 钩子拿到的 ctx 保留调用方的值（请求 ID、身份等），但不带事务本身，
+// 也不带取消/超时——事务的总预算不应该把提交后的发包、事件打死。
+// 钩子需要超时就自己控制。
+func AfterCommit(ctx context.Context, fn func(context.Context)) {
+	if fn == nil {
+		return
+	}
+	txn, ok := TransactionFromCtxOptional(ctx)
+	if !ok {
+		fn(context.WithoutCancel(ctx))
+		return
+	}
+	txn.AfterCommit(fn)
+}
+
+// AfterRollback 把 fn 注册到当前事务，在事务回滚后执行。
+// 没有事务时立即执行，语义与 AfterCommit 对称。
+func AfterRollback(ctx context.Context, fn func(context.Context)) {
+	if fn == nil {
+		return
+	}
+	txn, ok := TransactionFromCtxOptional(ctx)
+	if !ok {
+		fn(context.WithoutCancel(ctx))
+		return
+	}
+	txn.AfterRollback(fn)
 }
 
 // Track 把 obj 登记到当前 ctx 绑定的 Transaction。

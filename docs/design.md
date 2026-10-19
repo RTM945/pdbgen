@@ -83,6 +83,18 @@ A 和 B 是两个互不相干的 Go 对象，各带各的脏位和 orig 快照�
 
 **已知限制**：框架一次只挂一把锁，多把锁的获取顺序由业务自己保证；行的 UPDATE 顺序 = 对象注册顺序（首次查询顺序），一次事务锁多把锁时这个顺序会参与死锁判定。当前"一次事务一个 uid 一把锁"的模型下不存在这个问题。
 
+### 3.1 提交后 / 回滚后任务
+
+`dbctx.AfterCommit(ctx, fn)` / `dbctx.AfterRollback(ctx, fn)` 把任务挂到当前事务：
+
+- **AfterCommit** 只在 COMMIT 明确成功后执行；COMMIT 返回错误时结果不确定，两个钩子都不执行——可能已提交，不能发失败通知；也可能没提交，不能发成功通知。
+- **AfterRollback** 在业务返回错误、panic、或 Flush 失败导致回滚后执行。
+- **顺序**：都按注册顺序执行；同步执行在调用方 goroutine 上，慢钩子会拖慢请求。
+- **没有事务时**：直接执行（没有提交点可等）。
+- **上下文**：钩子拿到的是调用方 ctx 去掉取消/超时、且不带 SQLTx/Transaction 的副本；保留请求 ID 等值。钩子要查库用 `dbpool.Query`，不要用 `GetByXxx`（事务方法）拿事务 ctx。
+- **panic**：单个钩子 panic 只记日志（slog），后续钩子继续执行；已经提交的数据不受影响。
+- **用途**：发包、RPC、事件等外部副作用放 AfterCommit；失败通知放 AfterRollback。不要在钩子里做能失败并需要回滚的业务。
+
 ## 4. 生成代码的形状
 
 | 生成物 | 说明 |
@@ -114,6 +126,14 @@ A 和 B 是两个互不相干的 Go 对象，各带各的脏位和 orig 快照�
 - **Procedure 与 Transaction 的职责划分与命名**：[design-procedure-transaction.md](design-procedure-transaction.md)（提案，未实施）。实施时并入本文正文，并在变更记录里留痕。
 
 ## 7. 变更记录
+
+### 2026-10-20 增加 AfterCommit / AfterRollback
+
+- **改了什么**：`dbctx.Transaction` 增加 `AfterCommit` / `AfterRollback`；`dbpool.Transaction` 保存并在提交/回滚后按注册顺序执行；新增 `dbctx.AfterCommit` / `dbctx.AfterRollback` 注册入口；`WithTxPrepare` 在 COMMIT 成功、回滚完成后的对应时点执行钩子。
+- **为什么**：发包、事件、RPC 等外部副作用不能在 COMMIT 之前发出；业务失败时要能发失败通知。参考 xdb 的 `ppostWhileCommit` / `ppostWhileRollback` 和 aotu_gs 的 `sendMsgWhileCommit`。
+- **影响范围**：钩子同步执行；没有事务时立即执行；COMMIT 结果不确定时两个钩子都不执行；单个钩子 panic 只记日志，不影响后续钩子和事务结果。钩子 ctx 去掉 SQLTx/Transaction 和取消/超时，保留调用方值。
+- **验证状态**：`go build/vet/test` 通过；单元测试覆盖事务外立即执行、事务内委托、注册顺序、只执行一次、panic 隔离；集成测试在真实 PG 上通过（提交后可见、回滚后不可见、panic 路径回滚、钩子 panic 不影响提交）。
+- **未验证**：COMMIT 返回错误（结果不确定）时两个钩子都不跑——这条没有自动化测试，靠代码审查。
 
 ### 2026-10-20 命名统一：TX→SQLTx，Transaction
 

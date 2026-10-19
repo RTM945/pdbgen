@@ -3,6 +3,8 @@ package dbpool
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,6 +26,9 @@ type Transaction struct {
 	items []dbctx.Flusher
 	seen  map[dbctx.Flusher]struct{}
 	rows  map[rowKey]dbctx.Flusher
+
+	afterCommit   []func(context.Context)
+	afterRollback []func(context.Context)
 }
 
 func NewTransaction() *Transaction {
@@ -69,6 +74,53 @@ func (t *Transaction) Register(obj dbctx.Flusher) {
 	}
 
 	t.rows[key] = obj
+}
+
+// AfterCommit 实现 dbctx.Transaction，按注册顺序保存提交后任务。
+func (t *Transaction) AfterCommit(fn func(context.Context)) {
+	if fn == nil {
+		return
+	}
+	t.afterCommit = append(t.afterCommit, fn)
+}
+
+// AfterRollback 实现 dbctx.Transaction，按注册顺序保存回滚后任务。
+func (t *Transaction) AfterRollback(fn func(context.Context)) {
+	if fn == nil {
+		return
+	}
+	t.afterRollback = append(t.afterRollback, fn)
+}
+
+func (t *Transaction) runAfterCommit(ctx context.Context) {
+	hooks := t.afterCommit
+	t.afterCommit = nil
+	runHooks(ctx, "after-commit", hooks)
+}
+
+func (t *Transaction) runAfterRollback(ctx context.Context) {
+	hooks := t.afterRollback
+	t.afterRollback = nil
+	runHooks(ctx, "after-rollback", hooks)
+}
+
+// runHooks 顺序执行钩子。单个钩子 panic 只记日志，不影响后续钩子，
+// 也不会把已经提交的事务变成失败。
+func runHooks(ctx context.Context, kind string, hooks []func(context.Context)) {
+	for i, fn := range hooks {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("pdbgen: "+kind+" hook panic",
+						"index", i,
+						"panic", r,
+						"stack", string(debug.Stack()),
+					)
+				}
+			}()
+			fn(ctx)
+		}()
+	}
 }
 
 // Flush 从 ctx 里取出本次事务的 SQLTx（WithTxPrepare 已经 WithSQLTx 过），

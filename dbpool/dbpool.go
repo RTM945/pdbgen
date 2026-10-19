@@ -110,6 +110,10 @@ func WithTxPrepare(ctx context.Context, prepare func(context.Context, pgx.Tx) er
 		defer cancel()
 	}
 
+	// hookCtx 在放入 SQLTx/Transaction 之前保存：钩子运行时已经不在事务里，
+	// 不能让它看到事务上下文，否则 dbpool.Query 会误判"还在事务中"。
+	hookCtx := ctx
+
 	tx, err := dbpool.Begin(ctx)
 	if err != nil {
 		return err
@@ -121,19 +125,26 @@ func WithTxPrepare(ctx context.Context, prepare func(context.Context, pgx.Tx) er
 	ctx = dbctx.WithTransaction(ctx, txn)
 
 	defer func() {
+		// 钩子保留调用方的值，但去掉取消和超时：事务总预算不应该把
+		// 提交后的发包、事件打死。钩子需要超时就自己控制。
+		runCtx := context.WithoutCancel(hookCtx)
+
 		if r := recover(); r != nil {
 			_ = tx.Rollback(context.Background())
+			txn.runAfterRollback(runCtx)
 			panic(r)
 		}
 
 		if err != nil {
 			_ = tx.Rollback(context.Background())
+			txn.runAfterRollback(runCtx)
 			return
 		}
 
 		// 所有业务执行完成后，按注册顺序 flush dirty object。
 		if err = txn.Flush(ctx); err != nil {
 			_ = tx.Rollback(context.Background())
+			txn.runAfterRollback(runCtx)
 			return
 		}
 
@@ -145,9 +156,14 @@ func WithTxPrepare(ctx context.Context, prepare func(context.Context, pgx.Tx) er
 		//
 		// 注意这时候事务状态仍可能因为进程被杀而变成不确定的，所以照旧不依赖
 		// 下面的 Rollback 兜底。
+		// Commit 返回错误时结果不确定：可能已经提交，也可能没有。
+		// 这时候两个钩子都不能跑——跑 after-commit 可能在未提交时发包，
+		// 跑 after-rollback 可能在已提交时发失败通知。只把错误交给调用方。
 		if err = tx.Commit(context.WithoutCancel(ctx)); err != nil {
 			return
 		}
+
+		txn.runAfterCommit(runCtx)
 	}()
 
 	if prepare != nil {
