@@ -170,6 +170,11 @@ func (o {{ $.ReceiverName }}) GetBy{{ .Name }}(
 	ctx context.Context,
 	{{ .Params }},
 ) *{{ $.TypeName }} {
+{{- if .IsPrimaryKey }}
+	if v, ok := dbctx.GetCachedRecordAs[*{{ $.TypeName }}](ctx, "{{ $.TableName }}", {{ .Args }}); ok {
+		return v
+	}
+{{- end }}
 	return o.get{{ .Name }}(
 		ctx,
 		dbctx.SQLTxFromCtx(ctx),

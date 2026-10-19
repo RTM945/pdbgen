@@ -76,11 +76,12 @@ type Field struct {
 }
 
 type QueryMethod struct {
-	Name   string
-	Params string
-	Args   string
-	Where  string
-	IsList bool
+	Name         string
+	Params       string
+	Args         string
+	Where        string
+	IsList       bool
+	IsPrimaryKey bool
 }
 
 type TableGen struct {

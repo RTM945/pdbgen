@@ -217,6 +217,9 @@ func (o mail) GetById(
 	ctx context.Context,
 	id int64,
 ) *Mail {
+	if v, ok := dbctx.GetCachedRecordAs[*Mail](ctx, "user_mail", id); ok {
+		return v
+	}
 	return o.getId(
 		ctx,
 		dbctx.SQLTxFromCtx(ctx),

@@ -196,6 +196,9 @@ func (o redEnvelope) GetById(
 	ctx context.Context,
 	id int64,
 ) *RedEnvelope {
+	if v, ok := dbctx.GetCachedRecordAs[*RedEnvelope](ctx, "user_red_envelope", id); ok {
+		return v
+	}
 	return o.getId(
 		ctx,
 		dbctx.SQLTxFromCtx(ctx),

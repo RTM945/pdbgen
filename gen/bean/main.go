@@ -190,11 +190,12 @@ func buildTableGen(schema *readxml.Schema, table readxml.Table) (readxml.TableGe
 	// PK:
 	// GetById / SelectById
 	pkQuery := readxml.QueryMethod{
-		Name:   pk.MethodName,
-		Params: pk.Name + " " + pk.GoType,
-		Args:   pk.Name,
-		Where:  pk.Column + " = $1",
-		IsList: false,
+		Name:         pk.MethodName,
+		Params:       pk.Name + " " + pk.GoType,
+		Args:         pk.Name,
+		Where:        pk.Column + " = $1",
+		IsList:       false,
+		IsPrimaryKey: true,
 	}
 
 	gen.QueryMethods = append(gen.QueryMethods, pkQuery)

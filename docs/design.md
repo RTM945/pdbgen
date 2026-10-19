@@ -39,7 +39,7 @@ b.SetTotal(42)
 // 提交时只有一条 UPDATE: SET today_count=11, total=42 WHERE id=...
 ```
 
-第二次查询仍然会发一条 SELECT（pdbgen 是先扫描再解析，不是缓存优先），但扫描出来的对象会被丢弃，不会产生第二个可写对象。
+`GetById` 在事务里会先查身份表：命中就直接返回，**不再发 SELECT**，也就不会读到事务未 flush 的旧值。唯一索引查询（`GetByUidActId` 等）仍会先查询，因为身份表按主键索引；查回来后再解析成已有对象。
 
 ### 2.2 身份表的边界
 
@@ -133,7 +133,7 @@ b.SetTotal(42)
 
 - **改了什么**：`dbctx.Transaction` 用 `GetCachedRecord` / `AddCachedRecord`（对应 xdb 的 `getCachedTRecord` / `addCachedTRecord`）替代 `Register`；新增 `dbctx.GetOrAddCachedRecord`，`QueryOne` / `QueryList` / 生成代码的 `Insert` 都走它；`dbpool.Transaction` 维护 `(表名, 主键) -> Flusher` 的缓存记录表。
 - **为什么**：同一事务里同一行被两条查询路径各查一次会得到两个对象，提交时两条 UPDATE 各写各的绝对值，后写的静默覆盖先写的。之前用 panic 守卫；现在直接解析到同一个对象，既消除静默丢数据，也消除对业务写法的限制。命名对齐 xdb 的 `getCachedTRecord` / `addCachedTRecord`。
-- **影响范围**：`GetByXxx` / `ListByXxx` / `GetAll` 在事务内返回规范对象；`Identity()==0` 的对象不进表，`Insert` 回填后登记；非事务路径不变；`Update()` 仍绕过事务缓存。`Transaction.Register` 保留为 Deprecated 别名。
+- **影响范围**：`GetByXxx` / `ListByXxx` / `GetAll` 在事务内返回规范对象；`GetById` 命中身份表时不再发 SELECT；唯一索引查询仍先 SELECT 再解析；`Identity()==0` 的对象不进表，`Insert` 回填后登记；非事务路径不变；`Update()` 仍绕过事务缓存。`Transaction.Register` 保留为 Deprecated 别名。
 - **验证状态**：`go build/vet/test` 通过；单元测试覆盖命中、同指针、不同行、Identity=0、回填主键后登记、未命中；真实 PG 集成测试覆盖索引查询 + 主键查询返回同一指针、列表 + 单行查询返回同一指针、跨事务不共享。
 - **未验证**：暂无。
 

@@ -175,6 +175,9 @@ func (o user) GetById(
 	ctx context.Context,
 	id int64,
 ) *User {
+	if v, ok := dbctx.GetCachedRecordAs[*User](ctx, "user", id); ok {
+		return v
+	}
 	return o.getId(
 		ctx,
 		dbctx.SQLTxFromCtx(ctx),

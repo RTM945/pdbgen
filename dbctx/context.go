@@ -139,6 +139,29 @@ func AfterRollback(ctx context.Context, fn func(context.Context)) {
 	txn.AfterRollback(fn)
 }
 
+// GetCachedRecordAs 是 GetCachedRecord 的泛型版本：命中时把记录断言成 T。
+// 生成代码的 GetById 用它做缓存优先查询——命中就不发 SELECT。
+// 非事务或未命中返回零值和 false。
+func GetCachedRecordAs[T Flusher](ctx context.Context, tableName string, id int64) (T, bool) {
+	var zero T
+	txn, ok := TransactionFromCtxOptional(ctx)
+	if !ok {
+		return zero, false
+	}
+	rec, ok := txn.GetCachedRecord(tableName, id)
+	if !ok {
+		return zero, false
+	}
+	typed, ok := rec.(T)
+	if !ok {
+		panic(fmt.Sprintf(
+			"pdbgen: %s id=%d 的缓存记录类型不一致：已有 %T，期望 %T",
+			tableName, id, rec, zero,
+		))
+	}
+	return typed, true
+}
+
 // GetOrAddCachedRecord 把 obj 解析到当前事务的缓存记录：
 // 命中 (TableName, Identity) 时返回已有对象，否则登记 obj 并返回它。
 // 非事务查询（例如 GM/RPC 的 SelectXxx）没有 Transaction，直接返回 obj。
