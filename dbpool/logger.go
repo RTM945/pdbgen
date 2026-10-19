@@ -13,34 +13,34 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-type loggingTX struct {
-	dbctx.TX
+type loggingSQLTx struct {
+	dbctx.SQLTx
 }
 
-func (o *loggingTX) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+func (o *loggingSQLTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	start := time.Now()
 
-	tag, err := o.TX.Exec(ctx, sql, args...)
+	tag, err := o.SQLTx.Exec(ctx, sql, args...)
 
 	logSQL(start, sql, args, err)
 
 	return tag, err
 }
 
-func (o *loggingTX) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+func (o *loggingSQLTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	start := time.Now()
 
-	rows, err := o.TX.Query(ctx, sql, args...)
+	rows, err := o.SQLTx.Query(ctx, sql, args...)
 
 	logSQL(start, sql, args, err)
 
 	return rows, err
 }
 
-func (o *loggingTX) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+func (o *loggingSQLTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	start := time.Now()
 
-	row := o.TX.QueryRow(ctx, sql, args...)
+	row := o.SQLTx.QueryRow(ctx, sql, args...)
 
 	return &loggingRow{
 		row:   row,
@@ -52,11 +52,11 @@ func (o *loggingTX) QueryRow(ctx context.Context, sql string, args ...any) pgx.R
 
 // wrapLogger 只在 showSQL 打开时才包这一层。包上之后每条 SQL 都会记一条
 // message 是 "sql" 的日志：成功 Info，失败 Error（err 作为属性带上）。
-func wrapLogger(tx dbctx.TX) dbctx.TX {
+func wrapLogger(tx dbctx.SQLTx) dbctx.SQLTx {
 	if !showSQL {
 		return tx
 	}
-	return &loggingTX{TX: tx}
+	return &loggingSQLTx{SQLTx: tx}
 }
 
 func logSQL(start time.Time, sql string, args []any, err error) {

@@ -174,7 +174,7 @@ func (o *GMMail) ResetToLoaded() {
 }
 
 // TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
-// UnitOfWork 用它们检测同一事务里是否有两个对象指向同一行。
+// Transaction 用它们检测同一事务里是否有两个对象指向同一行。
 func (o *GMMail) TableName() string {
 	return "user_gm_mail"
 }
@@ -228,7 +228,7 @@ func (o gMMail) getId(
 	id int64,
 ) *GMMail {
 	const query = "SELECT " + selectColumnsGMMail +
-		" FROM user_gm_mail" +
+		" FROM \"user_gm_mail\"" +
 		" WHERE id = $1"
 	return dbctx.QueryOne(ctx, q, query, scanGMMail, id)
 }
@@ -239,7 +239,7 @@ func (o gMMail) GetById(
 ) *GMMail {
 	return o.getId(
 		ctx,
-		dbctx.TxFromCtx(ctx),
+		dbctx.SQLTxFromCtx(ctx),
 		id,
 	)
 }
@@ -260,14 +260,14 @@ func (o gMMail) getAll(
 	q dbctx.Querier,
 ) []*GMMail {
 	const query = "SELECT " + selectColumnsGMMail +
-		" FROM user_gm_mail"
+		" FROM \"user_gm_mail\""
 	return dbctx.QueryList(ctx, q, query, scanGMMail)
 }
 
 func (o gMMail) GetAll(
 	ctx context.Context,
 ) []*GMMail {
-	return o.getAll(ctx, dbctx.TxFromCtx(ctx))
+	return o.getAll(ctx, dbctx.SQLTxFromCtx(ctx))
 }
 
 func (o gMMail) SelectAll(
@@ -281,14 +281,14 @@ var ErrGMMailNotFound = errors.New(
 )
 
 // FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
-// UnitOfWork 据此跳过这一行，不占用一次往返。
+// Transaction 据此跳过这一行，不占用一次往返。
 func (v *GMMail) FlushStmt() (string, []any) {
 	if !v.loaded || v.dirty == 0 {
 		return "", nil
 	}
 	var sb strings.Builder
 	args := make([]any, 0, bits.OnesCount64(v.dirty)+1)
-	sb.WriteString("UPDATE user_gm_mail SET ")
+	sb.WriteString("UPDATE \"user_gm_mail\" SET ")
 	if v.dirty&dirtyGMMailParams != 0 {
 		if len(args) > 0 {
 			sb.WriteString(", ")
@@ -368,7 +368,7 @@ func (v *GMMail) FlushDone(rows int64) error {
 	return nil
 }
 
-// Update 是不经过 UnitOfWork 的直接落库入口，
+// Update 是不经过 Transaction 的直接落库入口，
 // 生成代码内部不再调用它，仅供业务代码需要立即写库时使用。
 func (o gMMail) Update(
 	ctx context.Context,
@@ -378,7 +378,7 @@ func (o gMMail) Update(
 	if query == "" {
 		return nil
 	}
-	tag, err := dbctx.TxFromCtx(ctx).Exec(ctx, query, args...)
+	tag, err := dbctx.SQLTxFromCtx(ctx).Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("user_gm_mail update: %w", err)
 	}
@@ -389,8 +389,8 @@ func (o gMMail) Insert(
 	ctx context.Context,
 	v *GMMail,
 ) {
-	tx := dbctx.TxFromCtx(ctx)
-	const query = "INSERT INTO user_gm_mail " +
+	tx := dbctx.SQLTxFromCtx(ctx)
+	const query = "INSERT INTO \"user_gm_mail\" " +
 		"(params, award_list, start_at, end_at, channel, user_created_at, condition) " +
 		"VALUES ($1, $2, $3, $4, $5, $6, $7)" +
 		" RETURNING id"
@@ -430,7 +430,4 @@ func (o gMMail) Insert(
 
 	v.dirty = 0
 	dbctx.Track(ctx, v)
-	// 注意：Insert 不登记身份表。插入之后这一行的对象就在调用方手里，业务代码
-	// 直接传参使用，不会回头再查一次；此时库里也还看不到这一行（未提交），
-	// 按索引查本来就是空。
 }

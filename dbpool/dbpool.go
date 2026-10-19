@@ -88,7 +88,7 @@ func Query(ctx context.Context, fn func(context.Context) error) error {
 	// 不允许在事务中调用 Query。
 	// 否则容易出现事务里已经修改数据，但 Query 却从
 	// pool 的另一条 PostgreSQL connection 读取的问题。
-	if dbctx.HasTx(ctx) {
+	if dbctx.HasSQLTx(ctx) {
 		return errors.New("dbpool.Query cannot be called inside transaction")
 	}
 
@@ -115,10 +115,10 @@ func WithTxPrepare(ctx context.Context, prepare func(context.Context, pgx.Tx) er
 		return err
 	}
 
-	uow := NewUnitOfWork()
+	txn := NewTransaction()
 	db := wrapLogger(tx)
-	ctx = dbctx.WithTx(ctx, db)
-	ctx = dbctx.WithUnitOfWork(ctx, uow)
+	ctx = dbctx.WithSQLTx(ctx, db)
+	ctx = dbctx.WithTransaction(ctx, txn)
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -132,7 +132,7 @@ func WithTxPrepare(ctx context.Context, prepare func(context.Context, pgx.Tx) er
 		}
 
 		// 所有业务执行完成后，按注册顺序 flush dirty object。
-		if err = uow.Flush(ctx); err != nil {
+		if err = txn.Flush(ctx); err != nil {
 			_ = tx.Rollback(context.Background())
 			return
 		}

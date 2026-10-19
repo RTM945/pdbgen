@@ -84,7 +84,7 @@ func (o *{{ .TypeName }}) ResetToLoaded() {
 }
 
 // TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
-// UnitOfWork 用它们检测同一事务里是否有两个对象指向同一行。
+// Transaction 用它们检测同一事务里是否有两个对象指向同一行。
 func (o *{{ .TypeName }}) TableName() string {
 	return "{{ .TableName }}"
 }
@@ -137,7 +137,7 @@ func (o {{ $.ReceiverName }}) ListBy{{ .Name }}(
 ) []*{{ $.TypeName }} {
 	return o.list{{ .Name }}(
 		ctx,
-		dbctx.TxFromCtx(ctx),
+		dbctx.SQLTxFromCtx(ctx),
 		{{ .Args }},
 	)
 }
@@ -171,7 +171,7 @@ func (o {{ $.ReceiverName }}) GetBy{{ .Name }}(
 ) *{{ $.TypeName }} {
 	return o.get{{ .Name }}(
 		ctx,
-		dbctx.TxFromCtx(ctx),
+		dbctx.SQLTxFromCtx(ctx),
 		{{ .Args }},
 	)
 }
@@ -202,7 +202,7 @@ func (o {{ .ReceiverName }}) getAll(
 func (o {{ .ReceiverName }}) GetAll(
 	ctx context.Context,
 ) []*{{ .TypeName }} {
-	return o.getAll(ctx, dbctx.TxFromCtx(ctx))
+	return o.getAll(ctx, dbctx.SQLTxFromCtx(ctx))
 }
 
 func (o {{ .ReceiverName }}) SelectAll(
@@ -216,7 +216,7 @@ var {{ .ErrorName }} = errors.New(
 )
 
 // FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
-// UnitOfWork 据此跳过这一行，不占用一次往返。
+// Transaction 据此跳过这一行，不占用一次往返。
 func (v *{{ .TypeName }}) FlushStmt() (string, []any) {
 	if !v.loaded || v.dirty == 0 {
 		return "", nil
@@ -253,7 +253,7 @@ func (v *{{ .TypeName }}) FlushDone(rows int64) error {
 	return nil
 }
 
-// Update 是不经过 UnitOfWork 的直接落库入口，
+// Update 是不经过 Transaction 的直接落库入口，
 // 生成代码内部不再调用它，仅供业务代码需要立即写库时使用。
 func (o {{ .ReceiverName }}) Update(
 	ctx context.Context,
@@ -263,7 +263,7 @@ func (o {{ .ReceiverName }}) Update(
 	if query == "" {
 		return nil
 	}
-	tag, err := dbctx.TxFromCtx(ctx).Exec(ctx, query, args...)
+	tag, err := dbctx.SQLTxFromCtx(ctx).Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("{{ .TableName }} update: %w", err)
 	}
@@ -274,7 +274,7 @@ func (o {{ .ReceiverName }}) Insert(
 	ctx context.Context,
 	v *{{ .TypeName }},
 ) {
-	tx := dbctx.TxFromCtx(ctx)
+	tx := dbctx.SQLTxFromCtx(ctx)
 	const query =
 		"INSERT INTO {{ quote .TableName }} " +
 		"({{ range $i, $field := .InsertFields }}{{ if $i }}, {{ end }}{{ $field.Column }}{{ end }}) " +

@@ -7,7 +7,7 @@ import (
 	"pdbgen/dbctx"
 )
 
-// rowStub 是 dbctx.Flusher 的最小实现，用来单独验证 UnitOfWork 的重复行检测，
+// rowStub 是 dbctx.Flusher 的最小实现，用来单独验证 Transaction 的重复行检测，
 // 不依赖数据库和生成代码。
 type rowStub struct {
 	table string
@@ -27,9 +27,9 @@ func (s *rowStub) FlushDone(int64) error { return nil }
 // TestRegisterDetectsDuplicateRow 同一个事务里两个对象指向同一行 → panic。
 // 这是唯一会静默丢数据的场景：两条 UPDATE 各写各的绝对值，后写的覆盖先写的。
 func TestRegisterDetectsDuplicateRow(t *testing.T) {
-	u := NewUnitOfWork()
+	txn := NewTransaction()
 	first := &rowStub{table: "user_mail", id: 7}
-	u.Register(first)
+	txn.Register(first)
 
 	defer func() {
 		r := recover()
@@ -45,47 +45,47 @@ func TestRegisterDetectsDuplicateRow(t *testing.T) {
 		}
 	}()
 
-	u.Register(&rowStub{table: "user_mail", id: 7})
+	txn.Register(&rowStub{table: "user_mail", id: 7})
 }
 
 // TestRegisterSamePointerIsNotDuplicate 同一个对象登记两次不是重复行——
 // QueryOne / QueryList 都会登记，业务代码也可能重复注册同一个指针。
 func TestRegisterSamePointerIsNotDuplicate(t *testing.T) {
-	u := NewUnitOfWork()
+	txn := NewTransaction()
 	obj := &rowStub{table: "user_mail", id: 7}
 
-	u.Register(obj)
-	u.Register(obj) // 不应该 panic
+	txn.Register(obj)
+	txn.Register(obj) // 不应该 panic
 
-	if len(u.items) != 1 {
-		t.Fatalf("同一个对象应该只收集一次，实际 %d 次", len(u.items))
+	if len(txn.items) != 1 {
+		t.Fatalf("同一个对象应该只收集一次，实际 %d 次", len(txn.items))
 	}
 }
 
 // TestRegisterDifferentRowsIsFine 不同行、不同表都可以共存。
 func TestRegisterDifferentRowsIsFine(t *testing.T) {
-	u := NewUnitOfWork()
-	u.Register(&rowStub{table: "user_mail", id: 7})
-	u.Register(&rowStub{table: "user_mail", id: 8})
-	u.Register(&rowStub{table: "user_gm_mail", id: 7})
+	txn := NewTransaction()
+	txn.Register(&rowStub{table: "user_mail", id: 7})
+	txn.Register(&rowStub{table: "user_mail", id: 8})
+	txn.Register(&rowStub{table: "user_gm_mail", id: 7})
 
-	if len(u.items) != 3 {
-		t.Fatalf("期望收集 3 个对象，实际 %d", len(u.items))
+	if len(txn.items) != 3 {
+		t.Fatalf("期望收集 3 个对象，实际 %d", len(txn.items))
 	}
 }
 
 // TestRegisterZeroIdentitySkipped 主键未回填（还没 Insert）的对象没有身份，
 // 不参与检测，也不会互相误伤。
 func TestRegisterZeroIdentitySkipped(t *testing.T) {
-	u := NewUnitOfWork()
-	u.Register(&rowStub{table: "user_mail", id: 0})
-	u.Register(&rowStub{table: "user_mail", id: 0})
+	txn := NewTransaction()
+	txn.Register(&rowStub{table: "user_mail", id: 0})
+	txn.Register(&rowStub{table: "user_mail", id: 0})
 
-	if len(u.items) != 2 {
-		t.Fatalf("期望收集 2 个对象，实际 %d", len(u.items))
+	if len(txn.items) != 2 {
+		t.Fatalf("期望收集 2 个对象，实际 %d", len(txn.items))
 	}
-	if len(u.rows) != 0 {
-		t.Fatalf("没有主键的对象不应该进 rows，实际 %d 条", len(u.rows))
+	if len(txn.rows) != 0 {
+		t.Fatalf("没有主键的对象不应该进 rows，实际 %d 条", len(txn.rows))
 	}
 }
 

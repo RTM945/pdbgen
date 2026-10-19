@@ -138,7 +138,7 @@ func (o *RedEnvelope) ResetToLoaded() {
 }
 
 // TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
-// UnitOfWork 用它们检测同一事务里是否有两个对象指向同一行。
+// Transaction 用它们检测同一事务里是否有两个对象指向同一行。
 func (o *RedEnvelope) TableName() string {
 	return "user_red_envelope"
 }
@@ -186,7 +186,7 @@ func (o redEnvelope) getId(
 	id int64,
 ) *RedEnvelope {
 	const query = "SELECT " + selectColumnsRedEnvelope +
-		" FROM user_red_envelope" +
+		" FROM \"user_red_envelope\"" +
 		" WHERE id = $1"
 	return dbctx.QueryOne(ctx, q, query, scanRedEnvelope, id)
 }
@@ -197,7 +197,7 @@ func (o redEnvelope) GetById(
 ) *RedEnvelope {
 	return o.getId(
 		ctx,
-		dbctx.TxFromCtx(ctx),
+		dbctx.SQLTxFromCtx(ctx),
 		id,
 	)
 }
@@ -219,7 +219,7 @@ func (o redEnvelope) getUidActId(
 	uid int64, actId int32,
 ) *RedEnvelope {
 	const query = "SELECT " + selectColumnsRedEnvelope +
-		" FROM user_red_envelope" +
+		" FROM \"user_red_envelope\"" +
 		" WHERE uid = $1 AND act_id = $2"
 	return dbctx.QueryOne(ctx, q, query, scanRedEnvelope, uid, actId)
 }
@@ -230,7 +230,7 @@ func (o redEnvelope) GetByUidActId(
 ) *RedEnvelope {
 	return o.getUidActId(
 		ctx,
-		dbctx.TxFromCtx(ctx),
+		dbctx.SQLTxFromCtx(ctx),
 		uid, actId,
 	)
 }
@@ -251,14 +251,14 @@ func (o redEnvelope) getAll(
 	q dbctx.Querier,
 ) []*RedEnvelope {
 	const query = "SELECT " + selectColumnsRedEnvelope +
-		" FROM user_red_envelope"
+		" FROM \"user_red_envelope\""
 	return dbctx.QueryList(ctx, q, query, scanRedEnvelope)
 }
 
 func (o redEnvelope) GetAll(
 	ctx context.Context,
 ) []*RedEnvelope {
-	return o.getAll(ctx, dbctx.TxFromCtx(ctx))
+	return o.getAll(ctx, dbctx.SQLTxFromCtx(ctx))
 }
 
 func (o redEnvelope) SelectAll(
@@ -272,14 +272,14 @@ var ErrRedEnvelopeNotFound = errors.New(
 )
 
 // FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
-// UnitOfWork 据此跳过这一行，不占用一次往返。
+// Transaction 据此跳过这一行，不占用一次往返。
 func (v *RedEnvelope) FlushStmt() (string, []any) {
 	if !v.loaded || v.dirty == 0 {
 		return "", nil
 	}
 	var sb strings.Builder
 	args := make([]any, 0, bits.OnesCount64(v.dirty)+1)
-	sb.WriteString("UPDATE user_red_envelope SET ")
+	sb.WriteString("UPDATE \"user_red_envelope\" SET ")
 	if v.dirty&dirtyRedEnvelopeUid != 0 {
 		if len(args) > 0 {
 			sb.WriteString(", ")
@@ -341,7 +341,7 @@ func (v *RedEnvelope) FlushDone(rows int64) error {
 	return nil
 }
 
-// Update 是不经过 UnitOfWork 的直接落库入口，
+// Update 是不经过 Transaction 的直接落库入口，
 // 生成代码内部不再调用它，仅供业务代码需要立即写库时使用。
 func (o redEnvelope) Update(
 	ctx context.Context,
@@ -351,7 +351,7 @@ func (o redEnvelope) Update(
 	if query == "" {
 		return nil
 	}
-	tag, err := dbctx.TxFromCtx(ctx).Exec(ctx, query, args...)
+	tag, err := dbctx.SQLTxFromCtx(ctx).Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("user_red_envelope update: %w", err)
 	}
@@ -362,8 +362,8 @@ func (o redEnvelope) Insert(
 	ctx context.Context,
 	v *RedEnvelope,
 ) {
-	tx := dbctx.TxFromCtx(ctx)
-	const query = "INSERT INTO user_red_envelope " +
+	tx := dbctx.SQLTxFromCtx(ctx)
+	const query = "INSERT INTO \"user_red_envelope\" " +
 		"(uid, act_id, last_refresh_at, today_count, total) " +
 		"VALUES ($1, $2, $3, $4, $5)" +
 		" RETURNING id"
@@ -397,7 +397,4 @@ func (o redEnvelope) Insert(
 
 	v.dirty = 0
 	dbctx.Track(ctx, v)
-	// 注意：Insert 不登记身份表。插入之后这一行的对象就在调用方手里，业务代码
-	// 直接传参使用，不会回头再查一次；此时库里也还看不到这一行（未提交），
-	// 按索引查本来就是空。
 }

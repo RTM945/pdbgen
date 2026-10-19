@@ -156,7 +156,7 @@ func (o *Mail) ResetToLoaded() {
 }
 
 // TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
-// UnitOfWork 用它们检测同一事务里是否有两个对象指向同一行。
+// Transaction 用它们检测同一事务里是否有两个对象指向同一行。
 func (o *Mail) TableName() string {
 	return "user_mail"
 }
@@ -207,7 +207,7 @@ func (o mail) getId(
 	id int64,
 ) *Mail {
 	const query = "SELECT " + selectColumnsMail +
-		" FROM user_mail" +
+		" FROM \"user_mail\"" +
 		" WHERE id = $1"
 	return dbctx.QueryOne(ctx, q, query, scanMail, id)
 }
@@ -218,7 +218,7 @@ func (o mail) GetById(
 ) *Mail {
 	return o.getId(
 		ctx,
-		dbctx.TxFromCtx(ctx),
+		dbctx.SQLTxFromCtx(ctx),
 		id,
 	)
 }
@@ -240,7 +240,7 @@ func (o mail) listUidConfId(
 	uid int64, confId int32,
 ) []*Mail {
 	const query = "SELECT " + selectColumnsMail +
-		" FROM user_mail" +
+		" FROM \"user_mail\"" +
 		" WHERE uid = $1 AND conf_id = $2"
 	return dbctx.QueryList(ctx, q, query, scanMail, uid, confId)
 }
@@ -251,7 +251,7 @@ func (o mail) ListByUidConfId(
 ) []*Mail {
 	return o.listUidConfId(
 		ctx,
-		dbctx.TxFromCtx(ctx),
+		dbctx.SQLTxFromCtx(ctx),
 		uid, confId,
 	)
 }
@@ -272,14 +272,14 @@ func (o mail) getAll(
 	q dbctx.Querier,
 ) []*Mail {
 	const query = "SELECT " + selectColumnsMail +
-		" FROM user_mail"
+		" FROM \"user_mail\""
 	return dbctx.QueryList(ctx, q, query, scanMail)
 }
 
 func (o mail) GetAll(
 	ctx context.Context,
 ) []*Mail {
-	return o.getAll(ctx, dbctx.TxFromCtx(ctx))
+	return o.getAll(ctx, dbctx.SQLTxFromCtx(ctx))
 }
 
 func (o mail) SelectAll(
@@ -293,14 +293,14 @@ var ErrMailNotFound = errors.New(
 )
 
 // FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
-// UnitOfWork 据此跳过这一行，不占用一次往返。
+// Transaction 据此跳过这一行，不占用一次往返。
 func (v *Mail) FlushStmt() (string, []any) {
 	if !v.loaded || v.dirty == 0 {
 		return "", nil
 	}
 	var sb strings.Builder
 	args := make([]any, 0, bits.OnesCount64(v.dirty)+1)
-	sb.WriteString("UPDATE user_mail SET ")
+	sb.WriteString("UPDATE \"user_mail\" SET ")
 	if v.dirty&dirtyMailUid != 0 {
 		if len(args) > 0 {
 			sb.WriteString(", ")
@@ -371,7 +371,7 @@ func (v *Mail) FlushDone(rows int64) error {
 	return nil
 }
 
-// Update 是不经过 UnitOfWork 的直接落库入口，
+// Update 是不经过 Transaction 的直接落库入口，
 // 生成代码内部不再调用它，仅供业务代码需要立即写库时使用。
 func (o mail) Update(
 	ctx context.Context,
@@ -381,7 +381,7 @@ func (o mail) Update(
 	if query == "" {
 		return nil
 	}
-	tag, err := dbctx.TxFromCtx(ctx).Exec(ctx, query, args...)
+	tag, err := dbctx.SQLTxFromCtx(ctx).Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("user_mail update: %w", err)
 	}
@@ -392,8 +392,8 @@ func (o mail) Insert(
 	ctx context.Context,
 	v *Mail,
 ) {
-	tx := dbctx.TxFromCtx(ctx)
-	const query = "INSERT INTO user_mail " +
+	tx := dbctx.SQLTxFromCtx(ctx)
+	const query = "INSERT INTO \"user_mail\" " +
 		"(uid, conf_id, state, receive_at, params, award_list) " +
 		"VALUES ($1, $2, $3, $4, $5, $6)" +
 		" RETURNING id"
@@ -430,7 +430,4 @@ func (o mail) Insert(
 
 	v.dirty = 0
 	dbctx.Track(ctx, v)
-	// 注意：Insert 不登记身份表。插入之后这一行的对象就在调用方手里，业务代码
-	// 直接传参使用，不会回头再查一次；此时库里也还看不到这一行（未提交），
-	// 按索引查本来就是空。
 }

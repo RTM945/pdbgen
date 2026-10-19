@@ -84,7 +84,7 @@ func TestDuplicateRowDetected(t *testing.T) {
 
 	defer func() {
 		_ = WithTx(ctx, func(ctx context.Context) error {
-			_, err := dbctx.TxFromCtx(ctx).Exec(
+			_, err := dbctx.SQLTxFromCtx(ctx).Exec(
 				ctx, "DELETE FROM user_red_envelope WHERE uid = $1", uid,
 			)
 			return err
@@ -160,7 +160,7 @@ func TestDuplicateDetectedEvenWithoutConflict(t *testing.T) {
 
 	defer func() {
 		_ = WithTx(ctx, func(ctx context.Context) error {
-			_, err := dbctx.TxFromCtx(ctx).Exec(
+			_, err := dbctx.SQLTxFromCtx(ctx).Exec(
 				ctx, "DELETE FROM user_red_envelope WHERE uid = $1", uid,
 			)
 			return err
@@ -221,7 +221,7 @@ func TestNewTransactionSeesCommittedData(t *testing.T) {
 
 	defer func() {
 		_ = WithTx(ctx, func(ctx context.Context) error {
-			_, err := dbctx.TxFromCtx(ctx).Exec(
+			_, err := dbctx.SQLTxFromCtx(ctx).Exec(
 				ctx, "DELETE FROM user_red_envelope WHERE uid = $1", uid,
 			)
 			return err

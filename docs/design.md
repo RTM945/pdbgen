@@ -32,7 +32,7 @@ a.SetTodayCount(11)
 b.SetTotal(42)
 ```
 
-A 和 B 是两个互不相干的 Go 对象，各带各的脏位和 orig 快照。提交时 UnitOfWork 会发出两条 UPDATE：`SET today_count = 11` 和 `SET total = 42`。写的是绝对值，同一列被两处改过时后执行的那条赢，先改的**静默消失**——没有日志、没有报错。这是框架里唯一会静默丢数据的失败模式。
+A 和 B 是两个互不相干的 Go 对象，各带各的脏位和 orig 快照。提交时 Transaction 会发出两条 UPDATE：`SET today_count = 11` 和 `SET total = 42`。写的是绝对值，同一列被两处改过时后执行的那条赢，先改的**静默消失**——没有日志、没有报错。这是框架里唯一会静默丢数据的失败模式。
 
 **Why 用检测而不是自动合并**：自动合并需要框架维护"一行一对象"的身份表（把第二次查出来的对象丢弃、返回第一次的指针）。但业务代码本来就会把第一次查出的对象传参使用，不会回头再查——为不存在的场景维护一张事务级身份表和一层查询包装不划算。所以框架只做守卫：**检测到同一行有两个对象就直接 panic**，请求失败、事务回滚。
 
@@ -40,19 +40,19 @@ A 和 B 是两个互不相干的 Go 对象，各带各的脏位和 orig 快照�
 
 ### 2.2 重复行检测的触发点和严格程度
 
-`UnitOfWork.Register` 在**每个对象被登记时**检查 `(表名, 主键)` 是否已经出现过：
+`Transaction.Register` 在**每个对象被登记时**检查 `(表名, 主键)` 是否已经出现过：
 
 - 触发时机是**注册时**（也就是第二次查询返回时），不是提交时。不用等到 flush 去比较脏位，早炸早发现。
 - 判断只看"是不是同一行"，**不看对象脏不脏**。即使只有一个对象被改过、两条 UPDATE 实际上不冲突，也会 panic。
 - 同一个对象（同一个指针）重复登记不算重复行——`QueryOne` 和 `QueryList` 都会登记，业务代码也可能重复注册同一个指针。
 - 主键为 0 的对象（自增主键还没回填、还没 `Insert`）没有身份，不参与检测。
-- 检测只在事务内有意义：非事务查询（`SelectXxx` / `Query`）没有 UnitOfWork，不会登记也不会检测。
+- 检测只在事务内有意义：非事务查询（`SelectXxx` / `Query`）没有 Transaction，不会登记也不会检测。
 
 严格程度的取舍：宽松版（只在两边都脏且脏位重叠时才炸）需要框架判断"两条 UPDATE 会不会真的冲突"，复杂且仍然拦不住全部情况；现在这样用一条 `(表名, 主键)` 就覆盖了全部场景，代价是极少数无害写法被拦——拦下的报错会告诉你改法。
 
 ### 2.3 落库时机在事务提交前，不在 `SetXxx` 时
 
-`SetXxx` 只改内存 + 置脏位；真正的 UPDATE 由 `WithTxPrepare` 在业务回调返回后统一 flush（`UnitOfWork.Flush`）。所以：
+`SetXxx` 只改内存 + 置脏位；真正的 UPDATE 由 `WithTxPrepare` 在业务回调返回后统一 flush（`Transaction.Flush`）。所以：
 
 - 事务中途查库看到的是**库里的值**，不是本事务刚改的值；
 - 一次事务里所有脏对象合并成一个 `pgx.Batch` 发出，一次往返；
@@ -97,8 +97,8 @@ A 和 B 是两个互不相干的 Go 对象，各带各的脏位和 orig 快照�
 | `Identity()` | 主键值，0 表示还没回填（还没 `Insert`），不参与检测 |
 | `FlushStmt()` / `FlushDone()` | 实现 `dbctx.Flusher`，只拼脏列 |
 | `ResetToLoaded()` | 回到 last-loaded 快照（单对象回滚，不是事务回滚） |
-| `Insert()` | `INSERT ... RETURNING <pk>`，回填主键、登记 UnitOfWork |
-| `Update()` | 绕过 UnitOfWork 的立即落库入口，生成代码内部不用 |
+| `Insert()` | `INSERT ... RETURNING <pk>`，回填主键、登记 Transaction |
+| `Update()` | 绕过 Transaction 的立即落库入口，生成代码内部不用 |
 
 改 `unique` 会改变生成的 API 形态（单行 ↔ 列表）。列表查询返回的每个元素都是新对象，所以要格外注意 2.1：**列表里已经有的行，不要再单独 `GetById` 查一次**——那正是检测会拦下的情况。
 
@@ -111,16 +111,24 @@ A 和 B 是两个互不相干的 Go 对象，各带各的脏位和 orig 快照�
 
 ## 6. 设计提案
 
-- **Procedure 与 UnitOfWork 的职责划分与命名**：[design-procedure-uow.md](design-procedure-uow.md)（提案，未实施）。实施时并入本文正文，并在变更记录里留痕。
+- **Procedure 与 Transaction 的职责划分与命名**：[design-procedure-transaction.md](design-procedure-transaction.md)（提案，未实施）。实施时并入本文正文，并在变更记录里留痕。
 
 ## 7. 变更记录
 
+### 2026-10-20 命名统一：TX→SQLTx，Transaction
+
+- **改了什么**：`dbctx.TX` → `dbctx.SQLTx`，`TxFromCtx` / `TxFromCtxOptional` / `WithTx` / `HasTx` 同步改名；`dbctx.UnitOfWork` / `dbpool.UnitOfWork` → `Transaction`；`NewUnitOfWork` → `NewTransaction`；文件 `dbpool/uow.go` → `dbpool/transaction.go`。旧名保留为 Deprecated 别名，方便外部代码过渡。生成模板同步改名并重新生成 `ptable/*.go`。
+- **为什么**：`UnitOfWork` 这个名字不够直接；`Transaction` 与 xdb 的术语一致。SQL 事务和业务事务工作集是两层不同的东西，`SQLTx` 明确前者，`Transaction` 留给后者。
+- **影响范围**：只改名，不改运行时语义、flush 时机和 panic 行为。`dbpool.WithTx` / `WithTxPrepare` 作为事务入口保留原名。
+- **验证状态**：`go build ./...`、`go vet ./...`、`go test ./...` 通过（含真实 PG 集成测试）。重新生成 `ptable/*.go` 时顺带同步了模板中已有的表名 quote，属于之前模板与生成物的漂移。
+- **未验证**：外部调用方是否使用旧名；旧名别名暂时保留。
+
 ### 2026-10-16 引入同一行重复检测
 
-- **改了什么**：`dbctx.Flusher` 加 `TableName() string`；`UnitOfWork` 加 `rows map[rowKey]dbctx.Flusher`，`Register` 在 `(表名, 主键)` 重复时 panic；生成模板加 `TableName()`，重新生成 `ptable/*.go`。
+- **改了什么**：`dbctx.Flusher` 加 `TableName() string`；`Transaction` 加 `rows map[rowKey]dbctx.Flusher`，`Register` 在 `(表名, 主键)` 重复时 panic；生成模板加 `TableName()`，重新生成 `ptable/*.go`。
 - **为什么**：同一行在一个事务里被两条查询路径各查一次会得到两个对象，提交时两条 UPDATE 各写各的绝对值，同一列被改两次时后写的静默覆盖先写的——这是框架里唯一会静默丢数据的场景。把它变成响的。
 - **影响范围**：只影响事务内的查询路径（`GetXxx`）；`SelectXxx` / `Query` 非事务路径不登记、不检测。`Flusher` 是接口，加方法会波及所有实现——当前实现只有生成代码，已同步重新生成。
-- **验证状态**：`dbpool/uow_test.go` 用最小 Flusher 替身覆盖检测逻辑（重复行 panic、同指针不误报、不同行/不同表不误报、主键为 0 跳过）；`dbpool/duplicate_test.go` 对真实 PG 覆盖端到端行为（混合查询路径触发 panic 且事务回滚、只有一方脏也照样拦、跨事务不误报）。`go vet ./...` 干净。
+- **验证状态**：`dbpool/transaction_test.go` 用最小 Flusher 替身覆盖检测逻辑（重复行 panic、同指针不误报、不同行/不同表不误报、主键为 0 跳过）；`dbpool/duplicate_test.go` 对真实 PG 覆盖端到端行为（混合查询路径触发 panic 且事务回滚、只有一方脏也照样拦、跨事务不误报）。`go vet ./...` 干净。
 - **未验证**：`ListByYyy` 与后续单行查询组合时的检测行为（见已知缺口 4，只有设计推理没有测试）。
 
 ### 2026-10-16 放弃事务级身份表（被上面的方案取代）
