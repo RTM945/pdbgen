@@ -15,7 +15,7 @@ pdbgen 原来有两个层面的"事务"，但名字没有体现出来：
 
 ## 2. 命名结论
 
-- **Procedure**：一次业务事务（入口、锁、超时、重试、提交/回滚后任务）。对应 xdb 的 `Procedure`，对应今天 `dbpool.Procedure` 的入口 + 回调。
+- **Procedure**：一次业务事务（入口、锁、超时、提交/回滚后任务）。重试由调用方决定，框架不自动重跑。对应 xdb 的 `Procedure`，对应今天 `dbpool.Procedure` 的入口 + 回调。
 - **Transaction**：事务内工作集（原 `UnitOfWork`）：身份表、脏对象、savepoint/回滚、提交/回滚后任务。对应 xdb 的 `Transaction` + `Savepoint`。
 - **SQLTx**：数据库事务（原 `dbctx.TX`）：执行 SQL、提交/回滚。对应 pgx.Tx。
 - **Flusher**：可落库实体。对应 xdb 的 `TRecord`。
@@ -75,21 +75,22 @@ Procedure.call()                         Procedure.java:213
 
 | 概念 | 现状（Phase 5 后） | 目标 |
 |---|---|---|
-| 业务事务 | `dbpool.Procedure`（锁 / 超时）+ 回调 | 增加重试 |
+| 业务事务 | `dbpool.Procedure`（锁 / 超时）+ 回调 | 重试由调用方决定 |
 | 内存工作集 | `dbpool.Transaction`：身份表 + 脏对象 + memento 回滚 + 提交后任务 | 增加嵌套 savepoint（可选） |
 | SQL 事务 | `dbctx.SQLTx` | 不变 |
 | 实体 | 生成结构体 + `Flusher` | 不变 |
 
 - `Procedure` 负责入口、锁和单次预算；`WithTxPrepare` 负责底层的 Begin、flush、commit/rollback。
 - `Transaction.GetCachedRecord` / `AddCachedRecord` 解析身份表，`Flush` 在提交前批量发 UPDATE。
-- 已经有身份表、提交后任务、统一入口和 memento 回滚；还没有嵌套 savepoint / 重试。
+- 已经有身份表、提交后任务、统一入口和 memento 回滚；还没有嵌套 savepoint。重试由调用方决定。
 
 ### 3.3 目标职责
 
 | 能力 | Procedure | Transaction | SQLTx |
 |---|---|---|---|
 | 决定事务边界 | 是 | 否 | 被调用 |
-| 获取锁 / 超时 / 重试 | 是 | 否 | 否 |
+| 获取锁 / 超时 | 是 | 否 | 否 |
+| 自动重试 | 否（由调用方决定） | 否 | 否 |
 | 业务逻辑 | 调用 `fn` | 否 | 否 |
 | 身份表 | 否 | 是 | 否 |
 | 收集脏对象 | 否 | 是 | 否 |
@@ -102,9 +103,12 @@ Procedure.call()                         Procedure.java:213
 
 ### 4.1 Procedure
 
-- 负责：事务入口、锁策略（单/双 key、try/block）、超时、重试、调用业务函数、按结果提交或回滚。
+- 负责：事务入口、锁策略（单/双 key、try/block）、超时、调用业务函数、按结果提交或回滚。
+- 不负责自动重试：try 锁失败返回错误，业务决定返回"稍后再试"还是在上层重跑。
 - 不负责：收集脏对象、拼 SQL、维护身份表。
-- **重试语义**：与 xdb 一致，遇到可重试错误（锁冲突、序列化失败）时整段重新执行。因此 `fn` 必须可重入，所有外部副作用（发包、RPC、事件）必须放到 `AfterCommit`。重试依赖内存回滚（Phase 5 已实现）；`Procedure` 目前还没有接入重试。
+- **不自动重试**：`Procedure` 只执行一次 `fn`。try 锁拿不到时返回 `ErrAdvisoryLockNotAcquired`，由业务回一个"稍后再试"的协议/错误码，或者在上层重试；框架不在请求内空转或退避。
+  - blocking 锁由 `lock_timeout` 限制等待时间，超时后返回错误，同样由调用方决定。
+  - PG 的 serialization failure / deadlock 是另一种情况：事务被数据库中止，框架回滚后 panic。要不要重跑由业务/接入层决定；`fn` 必须可重入，外部副作用走 `AfterCommit`。
 - **提交结果不确定**：COMMIT 发出后网络断开，不能当作成功，也不能重跑业务。保持现有 `context.WithoutCancel` 的处理方式；`AfterCommit` 只在 COMMIT 明确成功后运行。
 
 ### 4.2 Transaction
@@ -237,7 +241,7 @@ AdvisoryLock2(ns, id int32) LockSpec
 
 - 底层复用 `WithTxPrepare`。
 - `WithTx` / `WithTryAdvisoryLock*` / `WithAdvisoryLock*` 保留为薄封装，避免一次性改所有调用点。
-- **Retry 推迟到 Phase 5**：重试必须先把内存状态回滚干净，所以和 memento 一起做；Phase 4 的 `fn` 只执行一次。
+- **不提供 Retry 选项**：try 锁失败由业务返回"稍后再试"；框架不自动重跑 `fn`。需要重试时由调用方包一层循环，并自行保证幂等和钩子语义。
 - 如果保留嵌套语义，嵌套 `Procedure` 自动创建 savepoint；不需要嵌套时，Phase 5 只做 Procedure 级回滚，savepoint API 延后。
 
 ### 7.2 Transaction 接口
@@ -291,7 +295,7 @@ func GetCachedRecordAs[T Flusher](ctx context.Context, tableName string, id int6
 | 1 | **已完成**。命名迁移：`TX→SQLTx`、`UnitOfWork→Transaction`；保留 Deprecated 别名；改模板并重新生成 `ptable/*.go` | `go build/vet/test` 全绿；行为无变化 |
 | 2 | **已完成**。AfterCommit / AfterRollback；不碰生成实体 | 提交后可见、回滚不触发、panic 路径、hook panic 不影响其他 hook |
 | 3 | **已完成**。Transaction 身份表（`GetCachedRecord` / `AddCachedRecord`）；`GetOrAddCachedRecord` 返回规范对象；`GetById` 缓存优先；移除重复行 panic | 单元测试 + 真实 PG 的"同事务两次查询返回同一指针、第二次 GetById 不发 SELECT"测试 |
-| 4 | **已完成**。`Procedure` 入口（锁/超时）；先不做重试 | 锁参数和超时行为与现有 `With*Lock*` 一致 |
+| 4 | **已完成**。`Procedure` 入口（锁/超时）；不自动重试 | 锁参数和超时行为与现有 `With*Lock*` 一致 |
 | 5 | **已完成**。整事务 memento 回滚 + `ResetNew`；嵌套 savepoint 仍未实现 | 多对象修改回滚测试；Insert 后回滚测试；AfterRollback 看到恢复后的值 |
 | 6 | （可选）Persister / write-behind，与 Procedure 解耦 | 独立设计，不在本文范围 |
 
@@ -305,8 +309,8 @@ func GetCachedRecordAs[T Flusher](ctx context.Context, tableName string, id int6
 
 1. **重复行解析**：身份表命中后直接返回已有对象，不再 panic；design.md 2.1 / 2.2 已经改写并留了变更记录。事务级身份表同时承担去重和 read-your-writes，后续内存回滚也会以它为边界。
 2. **Flush 时机**：Phase 1-5 不变，仍在 COMMIT 前同步 Flush；Phase 6 才讨论异步。
-3. **错误传播**：保持 panic 传播；Procedure 只捕获可重试错误，其他错误原样抛出。
-4. **重试与副作用**：重试尚未接入；接入后 `fn` 可能被执行多次，所有对外副作用必须走 `AfterCommit`，否则重试会重复。
+3. **错误传播**：保持 panic 传播；Procedure 不吞错误，也不自动重试。
+4. **重试与副作用**：框架不自动重试；如果调用方自己重跑 `fn`，`fn` 可能被执行多次，所有对外副作用必须走 `AfterCommit`，否则会重复。
 5. **锁顺序**：Procedure 仍然只挂一把锁；多锁场景由业务保证顺序，与 design.md 第 3 节一致。
 6. **身份表的作用域**：Transaction 是事务级的，不跨事务；跨请求共享对象属于 write-behind/会话工作集，不在本提案范围内。
 7. **业务失败语义**：校验不通过返回错误，由 Procedure 整体回滚；业务不要在事务内 `recover` 后继续。参考 `RedPackRainRole.click()`：校验前置，失败直接返回 false。
@@ -322,7 +326,7 @@ func GetCachedRecordAs[T Flusher](ctx context.Context, tableName string, id int6
 ## 11. 待决问题
 
 1. `Procedure` 的锁参数是统一成 `LockSpec`，还是保留现有四个 `With*Lock*` 函数作为入口？
-2. 重试范围：只重试 `ErrAdvisoryLockNotAcquired`，还是也包括 PG 的 serialization failure / deadlock？后者需要业务回调严格幂等。
+2. ~~重试范围：只重试 `ErrAdvisoryLockNotAcquired`，还是也包括 PG 的 serialization failure / deadlock？~~ 已决定：框架不自动重试；try 锁失败由业务返回"稍后再试"，PG 中止的事务由调用方决定是否重跑。
 3. 嵌套 savepoint 是否要做？Phase 5 已实现 Procedure 级整体回滚；参考业务实现没有用到部分回滚，`Savepoint` / `RollbackTo` 继续延后。
 4. ~~`QueryList` 遇到重复行时，是返回同一指针两次，还是去重？~~ 已决定：与 xdb 一致，返回同一指针；`docs/design.md` 已注明列表元素可能重复。
 5. Transaction 是否向业务暴露 `Savepoint` / `RollbackTo`，还是只允许 Procedure 内部使用？

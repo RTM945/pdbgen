@@ -80,7 +80,7 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL �
 
 - 事务总预算由 `transactionTimeoutMs` 控制（`statement_timeout` 只管单条语句，PG 17 之前没有事务级 GUC），COMMIT 用 `context.WithoutCancel(ctx)`：一旦发出去就必须等到结果，避免"不知道到底提交没有"导致重试重复发放。
 - `prepare` 钩子里用 `SET LOCAL` 下发 `statement_timeout`、`idle_in_transaction_session_timeout`、`lock_timeout`，然后拿咨询锁。
-- 锁用 `ProcedureOptions.Lock` 指定：`TryAdvisoryLock(key)` / `TryAdvisoryLock2(ns, id)` 拿不到返回 `ErrAdvisoryLockNotAcquired`；`AdvisoryLock(key)` / `AdvisoryLock2(ns, id)` 会阻塞等待。旧的 `WithTryAdvisoryLock` / `WithAdvisoryLock*` 是 `Procedure` 的薄封装。单 bigint 与双 int32 的内置签名差异由 `lockArgs` 抽象（`lockKey` / `lockKey2`）处理，key 的语义框架不关心。
+- 锁用 `ProcedureOptions.Lock` 指定：`TryAdvisoryLock(key)` / `TryAdvisoryLock2(ns, id)` 拿不到返回 `ErrAdvisoryLockNotAcquired`；`AdvisoryLock(key)` / `AdvisoryLock2(ns, id)` 会阻塞等待。try 锁失败是正常的"玩家忙"信号，业务直接返回稍后再试，不要在请求内退避重试；框架也不自动重试。旧的 `WithTryAdvisoryLock` / `WithAdvisoryLock*` 是 `Procedure` 的薄封装。单 bigint 与双 int32 的内置签名差异由 `lockArgs` 抽象（`lockKey` / `lockKey2`）处理，key 的语义框架不关心。
 - 这套锁是用来替代 `SELECT ... FOR UPDATE` 做玩家级串行的（README 有说明：玩家请求用 try 版，GM/RPC 写请求用阻塞版，只读请求走非事务的 `Query`）。
 - 连接池是包级变量，`Init` 每进程调一次；`Close` 必须排在服务优雅关闭**之后**，否则会把在途请求打死在半路。`DefaultQueryExecMode` 被设成 `pgx.QueryExecModeExec`（简单协议），配合 pgBouncer 的 transaction pooling。
 
@@ -91,7 +91,7 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL �
 ## 已知缺口（README todo）
 
 - 咨询锁的 `hashtext` 拼接在 uid 超过 int32 时会出错，预想改成"默认用 uid、其他业务锁用枚举值"。
-- 只有事务级回滚；嵌套 savepoint / 部分回滚还没实现。重试尚未接入 `Procedure`。
+- 只有事务级回滚；嵌套 savepoint / 部分回滚还没实现。框架不自动重试：try 锁拿不到返回 `ErrAdvisoryLockNotAcquired`，由业务决定是否稍后再试。
 
 ## 参考实现
 

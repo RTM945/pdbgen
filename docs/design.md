@@ -115,7 +115,7 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 ```
 
 - `Timeout` 与 `transactionTimeoutMs` 同时生效时取更早到期的那个；COMMIT 仍然用 `WithoutCancel`，不受这个预算影响。
-- Phase 4 不做重试：`fn` 只执行一次。重试需要内存回滚（memento），等 Phase 5 再加。
+- **不自动重试**：try 锁拿不到返回 `ErrAdvisoryLockNotAcquired`，由业务返回"稍后再试"或在上层重试；框架不在请求里空转。blocking 锁由 `lock_timeout` 限制等待。`fn` 只执行一次。
 - `WithTx` / `WithTryAdvisoryLock*` / `WithAdvisoryLock*` 保留为薄封装，底层都走 `Procedure`；`WithTxPrepare` 是 `Procedure` 的底层实现，需要自定义 `prepare` 钩子时直接用它。
 
 ### 3.2 提交后 / 回滚后任务
@@ -164,21 +164,28 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 
 ## 7. 变更记录
 
+### 2026-10-20 明确不自动重试
+
+- **决定**：`Procedure` 不内置重试。try 锁拿不到返回 `ErrAdvisoryLockNotAcquired`，由业务返回"稍后再试"或在上层重试；blocking 锁由 `lock_timeout` 限制等待。PG serialization failure / deadlock 由调用方决定是否重跑。
+- **为什么**：try 锁本来就是"玩家忙"的业务信号，请求内退避会占住 worker；自动重跑还要求业务幂等并定义每次尝试的钩子语义。
+- **影响**：`ProcedureOptions` 不提供 Retry；文档里"重试待实现"的表述统一改成"不自动重试"。
+- **验证状态**：无代码变化。
+
 ### 2026-10-20 增加事务级内存回滚（memento）
 
 - **改了什么**：`dbctx.Flusher` 增加 `SnapshotState` / `RestoreState` / `ResetNew`；`dbctx.Transaction` 增加 `RegisterNew` / `Rollback`；`WithTxPrepare` 在错误、panic、Flush 失败时先恢复内存对象；生成的 `Insert` 先 `RegisterNew`。
 - **为什么**：重试和共享缓存需要失败后内存状态与数据库一致；之前只有单对象 `ResetToLoaded`。
 - **影响范围**：错误 / panic / Flush 失败路径恢复对象；COMMIT 结果不确定时不回滚内存、不执行钩子；成功路径不变。嵌套 savepoint / 部分回滚仍未实现。
 - **验证状态**：`go build/vet/test` 通过；单元测试覆盖快照恢复、多对象、新建对象 `ResetNew`；真实 PG 集成测试覆盖加载后修改回滚、panic 回滚、Insert 回滚、AfterRollback 钩子看到恢复后的值、多对象回滚。
-- **未验证**：嵌套 savepoint / 部分回滚；重试尚未开启。
+- **未验证**：嵌套 savepoint / 部分回滚；重试由调用方决定，不在框架内。
 
 ### 2026-10-20 增加 Procedure 统一入口
 
 - **改了什么**：新增 `dbpool.Procedure(ctx, ProcedureOptions, fn)`、`ProcedureOptions`、`LockSpec` 和四个锁构造器；`WithTx` / 四个 `With*Lock*` 改为 `Procedure` 的薄封装；`ProcedureOptions.Timeout` 可以给单次 Procedure 加预算。
-- **为什么**：把事务入口、锁、超时收敛到一个 xdb 风格的 `Procedure`；以后加重试时只需要改这一处。
+- **为什么**：把事务入口、锁、超时收敛到一个 xdb 风格的 `Procedure`；以后调整入口策略只需要改这一处。
 - **影响范围**：现有入口行为不变；Phase 4 不重试，`fn` 仍然只执行一次；`Timeout` 与全局预算取更早；COMMIT 不受预算影响。
 - **验证状态**：`go build/vet/test` 通过；真实 PG 集成测试覆盖 try 锁冲突、Timeout 体现在 ctx deadline、旧 `WithTryAdvisoryLock` 薄封装。
-- **未验证**：阻塞锁的等待/超时行为依赖 `lock_timeout`，没有单独测试；重试未实现。
+- **未验证**：阻塞锁的等待/超时行为依赖 `lock_timeout`，没有单独测试；自动重试不是目标。
 
 ### 2026-10-20 引入事务级缓存记录（身份表）
 
