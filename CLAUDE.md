@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 pdbgen 是面向 PostgreSQL 的"代码生成 + 运行时"框架，目标场景是游戏服务端：把 `pdb.xml` 作为数据库表和 Go 结构体的唯一事实来源，生成建表/迁移 SQL 和一套带脏标记追踪、工作单元（Transaction）批量落库的 CRUD 代码。模块名 `pdbgen`，Go 1.27，唯一直接依赖是 `github.com/jackc/pgx/v5`。
 
-运行时的语义承诺（事务、锁、重复行检测、欠账）记在 [docs/design.md](docs/design.md)：**改了运行时语义要同步改它**，并在它的"变更记录"里留痕。
+运行时的语义承诺（事务、锁、缓存记录/身份表、欠账）记在 [docs/design.md](docs/design.md)：**改了运行时语义要同步改它**，并在它的"变更记录"里留痕。
 
 ## 常用命令
 
@@ -58,9 +58,9 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL �
 
 - `SetXxx` 值没变就提前返回（不置脏位），变了就 `dirty |= 1<<n`；getter 只读当前值。生成器按 bean 字段顺序分配位，`UpdateFields` 决定哪些字段可以脏。
 - `TableName()` / `Identity()` / `FlushStmt()` / `FlushDone(rows)` 四个方法实现 `dbctx.Flusher`：`FlushStmt` 在 `dirty == 0` 或未 `loaded` 时返回空 query，否则按位拼出**只含脏列的 UPDATE**；`FlushDone` 回写 orig 快照、清 dirty，`rows == 0` 返回 `ErrXxxNotFound`；前两个给出行的身份（`Identity` 返回 0 表示主键未回填）。`ResetToLoaded()` 把实体回滚到快照。
-- 查询路径（`dbctx.QueryOne` / `QueryList`）在返回前调 `dbctx.Track` 把实体登记进当前 ctx 的 Transaction；`Insert` 也登记自己。
-- **同一事务里一行只允许有一个对象**：`Transaction.Register` 按 `(TableName(), Identity())` 检测，撞上就 panic（"后写的会静默覆盖先写的"）。它挡的是"同一行查两次 → 两个对象 → 两条 UPDATE 各写各的"这个唯一会静默丢数据的场景；检测在注册时触发、不看对象脏不脏，非事务路径不登记也不检测。这是使用约定 + 守卫，不是自动合并——业务代码应该复用第一次查出来的对象。细节见 [docs/design.md](docs/design.md)。
-- `dbpool.Transaction` 按注册顺序、以指针去重收集实体，`Flush` 把所有脏 UPDATE 合并成一个 `pgx.Batch` 一次往返发出，再按顺序执行 `FlushDone`。任何一条失败即返回错误，由 `WithTx` 的 defer 回滚。所以业务代码只管 `SetXxx`，落库时机和合并都在提交前统一处理。
+- 查询路径（`dbctx.QueryOne` / `QueryList`）在返回前调 `dbctx.GetOrAddCachedRecord` 把实体解析成当前事务的缓存记录；`Insert` 也走同一个入口。
+- **同一事务里一行只有一个缓存记录**：`Transaction.GetCachedRecord` / `AddCachedRecord` 按 `(TableName(), Identity())` 解析，命中就返回已有对象，第二次扫描出来的对象被丢弃（对应 xdb 的 `getCachedTRecord` / `addCachedTRecord`）。`Identity()==0` 的对象不进身份表，`Insert` 回填主键后再登记；非事务路径不登记。细节见 [docs/design.md](docs/design.md)。
+- `dbpool.Transaction` 按 `AddCachedRecord` 的登记顺序、以指针去重收集实体，`Flush` 把所有脏 UPDATE 合并成一个 `pgx.Batch` 一次往返发出，再按顺序执行 `FlushDone`。任何一条失败即返回错误，由 `WithTx` 的 defer 回滚。所以业务代码只管 `SetXxx`，落库时机和合并都在提交前统一处理。
 - `Update` 是绕过 Transaction 的立即落库入口，生成代码内部不调用它。
 - 外部副作用（发包、RPC、事件）用 `dbctx.AfterCommit(ctx, fn)`，失败通知用 `dbctx.AfterRollback(ctx, fn)`。钩子同步执行、按注册顺序；`AfterCommit` 只在 COMMIT 明确成功后跑，COMMIT 返回错误时两个都不跑；钩子 ctx 不带事务和取消/超时。
 

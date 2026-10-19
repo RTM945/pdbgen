@@ -3,6 +3,7 @@ package dbctx
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -49,7 +50,12 @@ type Flusher interface {
 // Transaction 是一次业务事务的工作集：身份表、脏对象、回滚和提交后任务。
 // 它由 Procedure 创建，随 Procedure 结束而销毁；SQL 事务本身见 SQLTx。
 type Transaction interface {
-	Register(obj Flusher)
+	// GetCachedRecord 返回事务里已经缓存的记录（对应 xdb 的 getCachedTRecord）。
+	GetCachedRecord(tableName string, id int64) (Flusher, bool)
+
+	// AddCachedRecord 把记录放进事务缓存并返回规范记录
+	// （对应 xdb 的 addCachedTRecord）。同一行已经有记录时返回已有记录。
+	AddCachedRecord(obj Flusher) Flusher
 
 	// AfterCommit 注册 COMMIT 明确成功后执行的任务。
 	AfterCommit(fn func(context.Context))
@@ -133,14 +139,46 @@ func AfterRollback(ctx context.Context, fn func(context.Context)) {
 	txn.AfterRollback(fn)
 }
 
-// Track 把 obj 登记到当前 ctx 绑定的 Transaction。
-// 非事务查询（例如 GM/RPC 的 SelectXxx）没有 Transaction，是空操作。
-func Track(ctx context.Context, obj Flusher) {
-	value := ctx.Value(transactionKey{})
-	if value == nil {
-		return
+// GetOrAddCachedRecord 把 obj 解析到当前事务的缓存记录：
+// 命中 (TableName, Identity) 时返回已有对象，否则登记 obj 并返回它。
+// 非事务查询（例如 GM/RPC 的 SelectXxx）没有 Transaction，直接返回 obj。
+//
+// 对应 xdb 的 getCachedTRecord + addCachedTRecord 两步。pdbgen 是先扫描
+// 再解析，所以命中时新扫出来的对象会被丢弃；对象本身没有 identity 时不进缓存。
+func GetOrAddCachedRecord[T Flusher](ctx context.Context, obj T) T {
+	txn, ok := TransactionFromCtxOptional(ctx)
+	if !ok {
+		return obj
 	}
-	value.(Transaction).Register(obj)
+
+	id := obj.Identity()
+	if id != 0 {
+		if existing, ok := txn.GetCachedRecord(obj.TableName(), id); ok {
+			canonical, ok := existing.(T)
+			if !ok {
+				panic(fmt.Sprintf(
+					"pdbgen: %s id=%d 的缓存记录类型不一致：已有 %T，新来 %T",
+					obj.TableName(), id, existing, obj,
+				))
+			}
+			return canonical
+		}
+	}
+
+	added := txn.AddCachedRecord(obj)
+	canonical, ok := added.(T)
+	if !ok {
+		panic(fmt.Sprintf(
+			"pdbgen: %s id=%d 的缓存记录类型不一致：返回 %T，期望 %T",
+			obj.TableName(), id, added, obj,
+		))
+	}
+	return canonical
+}
+
+// Deprecated: use GetOrAddCachedRecord.
+func Track[T Flusher](ctx context.Context, obj T) T {
+	return GetOrAddCachedRecord(ctx, obj)
 }
 
 // QueryOne 是 GetByXxx/SelectByXxx 生成代码的公共实现：
@@ -161,8 +199,7 @@ func QueryOne[T Flusher](
 		}
 		panic(err)
 	}
-	Track(ctx, obj)
-	return obj
+	return GetOrAddCachedRecord(ctx, obj)
 }
 
 // QueryList 是 ListByXxx/SelectListByXxx/GetAll/SelectAll 的生成代码公共实现。
@@ -185,8 +222,7 @@ func QueryList[T Flusher](
 		if err != nil {
 			panic(err)
 		}
-		Track(ctx, obj)
-		result = append(result, obj)
+		result = append(result, GetOrAddCachedRecord(ctx, obj))
 	}
 	if err := rows.Err(); err != nil {
 		panic(err)

@@ -20,7 +20,11 @@ type fakeTransaction struct {
 	rollbackFns int
 }
 
-func (f *fakeTransaction) Register(dbctx.Flusher) {}
+func (f *fakeTransaction) GetCachedRecord(string, int64) (dbctx.Flusher, bool) {
+	return nil, false
+}
+
+func (f *fakeTransaction) AddCachedRecord(obj dbctx.Flusher) dbctx.Flusher { return obj }
 
 func (f *fakeTransaction) AfterCommit(fn func(context.Context)) { f.commitFns++ }
 

@@ -138,7 +138,8 @@ func (o *RedEnvelope) ResetToLoaded() {
 }
 
 // TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
-// Transaction 用它们检测同一事务里是否有两个对象指向同一行。
+// Transaction 用它们把同一行解析到同一个缓存记录
+// （xdb: getCachedTRecord / addCachedTRecord）。
 func (o *RedEnvelope) TableName() string {
 	return "user_red_envelope"
 }
@@ -396,5 +397,5 @@ func (o redEnvelope) Insert(
 	v.origTotal = v.total
 
 	v.dirty = 0
-	dbctx.Track(ctx, v)
+	dbctx.GetOrAddCachedRecord(ctx, v)
 }

@@ -14,41 +14,43 @@ pdbgen 是面向游戏服务端的 PostgreSQL 数据访问框架：`pdb.xml` 定
 - 表都是窄表，一次请求涉及的改动少；
 - 宁可让约束显式（panic、报错），也不做隐式兜底。
 
-在这三个前提下，框架选择了"脏标记 + 工作单元 + 重复行检测"的组合，而不是 SQL 构建器或 ActiveRecord。
+在这三个前提下，框架选择了"脏标记 + 事务工作集 + 身份表"的组合，而不是 SQL 构建器或 ActiveRecord。
 
 ## 2. 核心不变量
 
-### 2.1 一次请求里，同一行只查一次、只有一个对象
+### 2.1 一次事务里，同一行只有一个缓存记录
 
-这是**使用约定**，不是框架替你保证的事。框架的作用是：违反了会立刻炸，不会静默写坏数据。
+`dbctx.GetOrAddCachedRecord` 在事务内按 `(TableName(), Identity())` 解析记录：
 
-违反的后果本来是这样的：
+- 命中时返回已有对象，**丢弃**这次新扫描出来的对象；
+- 未命中时把它放进事务缓存并返回；
+- 非事务查询（`SelectXxx` / `Query`）没有 Transaction，直接返回扫描出来的对象。
+
+这对应 xdb 的两步：`Transaction.getCachedTRecord` 命中就直接用，未命中再 `addCachedTRecord`；生成的实体相当于 xdb 的 `TRecord`。
+
+所以同一个事务里：
 
 ```go
-// 同一个事务内，两条路径查到同一行
-a := UserRedEnvelopeTable.GetByUidActId(ctx, uid, actId)  // 对象 A
-b := UserRedEnvelopeTable.GetById(ctx, a.Id())             // 对象 B，同一行
+a := UserRedEnvelopeTable.GetByUidActId(ctx, uid, actId)
+b := UserRedEnvelopeTable.GetById(ctx, a.Id())
+// a == b，是同一个指针
 a.SetTodayCount(11)
 b.SetTotal(42)
+// 提交时只有一条 UPDATE: SET today_count=11, total=42 WHERE id=...
 ```
 
-A 和 B 是两个互不相干的 Go 对象，各带各的脏位和 orig 快照。提交时 Transaction 会发出两条 UPDATE：`SET today_count = 11` 和 `SET total = 42`。写的是绝对值，同一列被两处改过时后执行的那条赢，先改的**静默消失**——没有日志、没有报错。这是框架里唯一会静默丢数据的失败模式。
+第二次查询仍然会发一条 SELECT（pdbgen 是先扫描再解析，不是缓存优先），但扫描出来的对象会被丢弃，不会产生第二个可写对象。
 
-**Why 用检测而不是自动合并**：自动合并需要框架维护"一行一对象"的身份表（把第二次查出来的对象丢弃、返回第一次的指针）。但业务代码本来就会把第一次查出的对象传参使用，不会回头再查——为不存在的场景维护一张事务级身份表和一层查询包装不划算。所以框架只做守卫：**检测到同一行有两个对象就直接 panic**，请求失败、事务回滚。
+### 2.2 身份表的边界
 
-**How to apply**：正常写就不会碰到。真碰到了，报错信息会给出表名、主键和改法：复用第一次查出来的对象。
+- 触发时机是**扫描完成后、返回给业务前**；`QueryOne` / `QueryList` 都会走这一步。
+- 命中判断只看 `(表名, 主键)`，**不看对象脏不脏**。
+- 同一个指针重复登记只算一次，不会重复进 flush 列表。
+- `Identity() == 0` 的对象（自增主键还没回填、还没 `Insert`）没有身份，不进身份表；`Insert` 回填主键后会再登记一次。
+- 身份表只在事务内有效；跨事务/跨请求不共享。
+- `QueryList` 里如果同一个 `(表名, 主键)` 出现多次，返回的切片里会是同一个指针（列表元素可能重复）。
 
-### 2.2 重复行检测的触发点和严格程度
-
-`Transaction.Register` 在**每个对象被登记时**检查 `(表名, 主键)` 是否已经出现过：
-
-- 触发时机是**注册时**（也就是第二次查询返回时），不是提交时。不用等到 flush 去比较脏位，早炸早发现。
-- 判断只看"是不是同一行"，**不看对象脏不脏**。即使只有一个对象被改过、两条 UPDATE 实际上不冲突，也会 panic。
-- 同一个对象（同一个指针）重复登记不算重复行——`QueryOne` 和 `QueryList` 都会登记，业务代码也可能重复注册同一个指针。
-- 主键为 0 的对象（自增主键还没回填、还没 `Insert`）没有身份，不参与检测。
-- 检测只在事务内有意义：非事务查询（`SelectXxx` / `Query`）没有 Transaction，不会登记也不会检测。
-
-严格程度的取舍：宽松版（只在两边都脏且脏位重叠时才炸）需要框架判断"两条 UPDATE 会不会真的冲突"，复杂且仍然拦不住全部情况；现在这样用一条 `(表名, 主键)` 就覆盖了全部场景，代价是极少数无害写法被拦——拦下的报错会告诉你改法。
+这条保证替代了早期的"同一行两个对象就 panic"守卫：现在不是报错，而是把第二次扫描出来的对象解析成第一次的记录。`Update()` 绕过事务缓存，仍然直接使用传入的对象。
 
 ### 2.3 落库时机在事务提交前，不在 `SetXxx` 时
 
@@ -64,7 +66,7 @@ A 和 B 是两个互不相干的 Go 对象，各带各的脏位和 orig 快照�
 
 ### 2.5 `GetXxx` 与 `SelectXxx` 互斥
 
-| | 必须在事务里 | 用哪条连接 | 参与重复行检测 |
+| | 必须在事务里 | 用哪条连接 | 参与身份表解析 |
 |---|---|---|---|
 | `GetByXxx` / `GetById` | 是（否则 panic） | 事务 | 是 |
 | `SelectByXxx` / `SelectById` / `SelectAll` | 否（是则 panic） | 连接池 | 否 |
@@ -105,27 +107,35 @@ A 和 B 是两个互不相干的 Go 对象，各带各的脏位和 orig 快照�
 | `ListByYyy` / `SelectListByYyy` | **非 unique 索引**查询，返回 `[]*Xxx` |
 | `GetAll` / `SelectAll` | 全表，返回 `[]*Xxx` |
 | `SetXxx` / `Xxx()` | 写入（值没变不置脏位）/ 读取 |
-| `TableName()` | 表名常量，实现 `dbctx.Flusher`，供重复行检测用 |
-| `Identity()` | 主键值，0 表示还没回填（还没 `Insert`），不参与检测 |
+| `TableName()` | 表名常量，实现 `dbctx.Flusher`，供身份表解析用 |
+| `Identity()` | 主键值，0 表示还没回填（还没 `Insert`），不参与身份表解析 |
 | `FlushStmt()` / `FlushDone()` | 实现 `dbctx.Flusher`，只拼脏列 |
 | `ResetToLoaded()` | 回到 last-loaded 快照（单对象回滚，不是事务回滚） |
-| `Insert()` | `INSERT ... RETURNING <pk>`，回填主键、登记 Transaction |
+| `Insert()` | `INSERT ... RETURNING <pk>`，回填主键、`GetOrAddCachedRecord` 登记 |
 | `Update()` | 绕过 Transaction 的立即落库入口，生成代码内部不用 |
 
-改 `unique` 会改变生成的 API 形态（单行 ↔ 列表）。列表查询返回的每个元素都是新对象，所以要格外注意 2.1：**列表里已经有的行，不要再单独 `GetById` 查一次**——那正是检测会拦下的情况。
+改 `unique` 会改变生成的 API 形态（单行 ↔ 列表）。列表查询返回的元素在事务内都会登记进身份表；再对同一行单独 `GetById` 会返回列表里的同一个指针，不会产生第二个对象。
 
 ## 5. 已知缺口
 
 1. **`ResetToLoaded` 只回滚单个对象**：一次请求改多张表时没有 ctx 级的回滚日志，要回滚得自己按逆序处理（README todo）。
 2. **咨询锁 key 的哈希问题**：`hashtext('user', uid)` 用两个 int 拼，uid 超过 int32 会出错；预想改成默认直接用 uid、其他业务锁用生成代码的枚举值（README todo）。
 3. **多咨询锁场景下的加锁/更新顺序**：见第 3 节，当前模型下不适用。
-4. **`ListByYyy` 的元素与后续单行查询的重复检测**：列表里的对象登记后，再对同一行单独 `GetById` 会 panic——这是设计使然，但列表 + 逐条处理的写法（比如分页邮件列表里逐封取）需要改成复用列表里的对象。
+4. **`QueryList` 的重复指针**：同一事务里如果列表查询返回了同一行多次，切片里的元素会是同一个指针；业务如果假定列表元素互不相同，需要自己去重。
 
 ## 6. 设计提案
 
 - **Procedure 与 Transaction 的职责划分与命名**：[design-procedure-transaction.md](design-procedure-transaction.md)（提案，未实施）。实施时并入本文正文，并在变更记录里留痕。
 
 ## 7. 变更记录
+
+### 2026-10-20 引入事务级缓存记录（身份表）
+
+- **改了什么**：`dbctx.Transaction` 用 `GetCachedRecord` / `AddCachedRecord`（对应 xdb 的 `getCachedTRecord` / `addCachedTRecord`）替代 `Register`；新增 `dbctx.GetOrAddCachedRecord`，`QueryOne` / `QueryList` / 生成代码的 `Insert` 都走它；`dbpool.Transaction` 维护 `(表名, 主键) -> Flusher` 的缓存记录表。
+- **为什么**：同一事务里同一行被两条查询路径各查一次会得到两个对象，提交时两条 UPDATE 各写各的绝对值，后写的静默覆盖先写的。之前用 panic 守卫；现在直接解析到同一个对象，既消除静默丢数据，也消除对业务写法的限制。命名对齐 xdb 的 `getCachedTRecord` / `addCachedTRecord`。
+- **影响范围**：`GetByXxx` / `ListByXxx` / `GetAll` 在事务内返回规范对象；`Identity()==0` 的对象不进表，`Insert` 回填后登记；非事务路径不变；`Update()` 仍绕过事务缓存。`Transaction.Register` 保留为 Deprecated 别名。
+- **验证状态**：`go build/vet/test` 通过；单元测试覆盖命中、同指针、不同行、Identity=0、回填主键后登记、未命中；真实 PG 集成测试覆盖索引查询 + 主键查询返回同一指针、列表 + 单行查询返回同一指针、跨事务不共享。
+- **未验证**：暂无。
 
 ### 2026-10-20 增加 AfterCommit / AfterRollback
 
@@ -148,7 +158,7 @@ A 和 B 是两个互不相干的 Go 对象，各带各的脏位和 orig 快照�
 - **改了什么**：`dbctx.Flusher` 加 `TableName() string`；`Transaction` 加 `rows map[rowKey]dbctx.Flusher`，`Register` 在 `(表名, 主键)` 重复时 panic；生成模板加 `TableName()`，重新生成 `ptable/*.go`。
 - **为什么**：同一行在一个事务里被两条查询路径各查一次会得到两个对象，提交时两条 UPDATE 各写各的绝对值，同一列被改两次时后写的静默覆盖先写的——这是框架里唯一会静默丢数据的场景。把它变成响的。
 - **影响范围**：只影响事务内的查询路径（`GetXxx`）；`SelectXxx` / `Query` 非事务路径不登记、不检测。`Flusher` 是接口，加方法会波及所有实现——当前实现只有生成代码，已同步重新生成。
-- **验证状态**：`dbpool/transaction_test.go` 用最小 Flusher 替身覆盖检测逻辑（重复行 panic、同指针不误报、不同行/不同表不误报、主键为 0 跳过）；`dbpool/duplicate_test.go` 对真实 PG 覆盖端到端行为（混合查询路径触发 panic 且事务回滚、只有一方脏也照样拦、跨事务不误报）。`go vet ./...` 干净。
+- **验证状态**：`dbpool/transaction_test.go` 用最小 Flusher 替身覆盖检测逻辑（重复行 panic、同指针不误报、不同行/不同表不误报、主键为 0 跳过）；`dbpool/duplicate_test.go` 对真实 PG 覆盖端到端行为（混合查询路径触发 panic 且事务回滚、只有一方脏也照样拦、跨事务不误报）。`go vet ./...` 干净。**注：重复行 panic 已在 2026-10-20 被身份表取代，见上一条变更记录。**
 - **未验证**：`ListByYyy` 与后续单行查询组合时的检测行为（见已知缺口 4，只有设计推理没有测试）。
 
 ### 2026-10-16 放弃事务级身份表（被上面的方案取代）
