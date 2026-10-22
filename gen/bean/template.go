@@ -29,7 +29,8 @@ type {{ .TypeName }} struct {
 {{- range .Fields }}
 	{{ .Name }} {{ .GoType }}
 {{- end }}
-	loaded bool
+	loaded  bool
+	deleted bool
 {{- range .UpdateFields }}
 	orig{{ .MethodName }} {{ .GoType }}
 {{- end }}
@@ -40,7 +41,8 @@ type {{ .ReceiverName }}State struct {
 {{- range .Fields }}
 	{{ .Name }} {{ .GoType }}
 {{- end }}
-	loaded bool
+	loaded  bool
+	deleted bool
 {{- range .UpdateFields }}
 	orig{{ .MethodName }} {{ .GoType }}
 {{- end }}
@@ -91,7 +93,21 @@ func (o *{{ .TypeName }}) ResetToLoaded() {
 {{- range .UpdateFields }}
 	o.{{ .Name }} = o.orig{{ .MethodName }}
 {{- end }}
+	o.deleted = false
 	o.dirty = 0
+}
+
+// Delete 把这一行标记为待删除；实际 DELETE 在事务提交前由 flush 统一发出。
+func (v *{{ .TypeName }}) Delete() {
+	if !v.loaded || v.deleted {
+		return
+	}
+	v.deleted = true
+}
+
+// IsDeleted 报告这一行是否在本次事务里被标记删除。
+func (v *{{ .TypeName }}) IsDeleted() bool {
+	return v.deleted
 }
 
 func (v *{{ .TypeName }}) SnapshotState() dbctx.RecordState {
@@ -99,7 +115,8 @@ func (v *{{ .TypeName }}) SnapshotState() dbctx.RecordState {
 {{- range .Fields }}
 		{{ .Name }}: v.{{ .Name }},
 {{- end }}
-		loaded: v.loaded,
+		loaded:  v.loaded,
+		deleted: v.deleted,
 {{- range .UpdateFields }}
 		orig{{ .MethodName }}: v.orig{{ .MethodName }},
 {{- end }}
@@ -113,6 +130,7 @@ func (v *{{ .TypeName }}) RestoreState(state dbctx.RecordState) {
 	v.{{ .Name }} = s.{{ .Name }}
 {{- end }}
 	v.loaded = s.loaded
+	v.deleted = s.deleted
 {{- range .UpdateFields }}
 	v.orig{{ .MethodName }} = s.orig{{ .MethodName }}
 {{- end }}
@@ -125,6 +143,7 @@ func (v *{{ .TypeName }}) ResetNew() {
 	v.{{ .PK.Name }} = 0
 {{- end }}
 	v.loaded = false
+	v.deleted = false
 	v.dirty = 0
 }
 
@@ -217,6 +236,9 @@ func (o {{ $.ReceiverName }}) GetBy{{ .Name }}(
 ) *{{ $.TypeName }} {
 {{- if .IsPrimaryKey }}
 	if v, ok := dbctx.GetCachedRecordAs[*{{ $.TypeName }}](ctx, "{{ $.TableName }}", {{ .Args }}); ok {
+		if v.IsDeleted() {
+			return nil
+		}
 		return v
 	}
 {{- end }}
@@ -239,6 +261,20 @@ func (o {{ $.ReceiverName }}) SelectBy{{ .Name }}(
 }
 {{ end }}
 {{ end }}
+
+// DeleteBy{{ .PK.MethodName }} 在事务里按主键标记删除；找不到返回 false。
+// 实际 DELETE 在事务提交前由 flush 统一发出，失败时由 memento 恢复。
+func (o {{ .ReceiverName }}) DeleteBy{{ .PK.MethodName }}(
+	ctx context.Context,
+	{{ .PK.Name }} {{ .PK.GoType }},
+) bool {
+	v := o.GetBy{{ .PK.MethodName }}(ctx, {{ .PK.Name }})
+	if v == nil {
+		return false
+	}
+	v.Delete()
+	return true
+}
 
 func (o {{ .ReceiverName }}) getAll(
 	ctx context.Context,
@@ -267,9 +303,15 @@ var {{ .ErrorName }} = errors.New(
 )
 
 // FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
-// Transaction 据此跳过这一行，不占用一次往返。
+// deleted 时返回 DELETE；Transaction 据此跳过没有变化的行。
 func (v *{{ .TypeName }}) FlushStmt() (string, []any) {
-	if !v.loaded || v.dirty == 0 {
+	if !v.loaded {
+		return "", nil
+	}
+	if v.deleted {
+		return "DELETE FROM {{ quote .TableName }} WHERE {{ .PK.Column }} = $1", []any{v.{{ .PK.Name }}}
+	}
+	if v.dirty == 0 {
 		return "", nil
 	}
 	var sb strings.Builder
@@ -291,11 +333,18 @@ func (v *{{ .TypeName }}) FlushStmt() (string, []any) {
 	return sb.String(), args
 }
 
-// FlushDone 实现 dbctx.Flusher，在对应 UPDATE 执行成功后回调，
-// 同步 orig 快照并清空 dirty；rows == 0 说明这一行已被删除或从未存在。
+// FlushDone 实现 dbctx.Flusher，在对应 UPDATE/DELETE 执行成功后回调。
+// UPDATE 同步 orig 快照并清空 dirty；DELETE 把对象置为未加载。
+// rows == 0 说明这一行已经不存在。
 func (v *{{ .TypeName }}) FlushDone(rows int64) error {
 	if rows == 0 {
 		return {{ .ErrorName }}
+	}
+	if v.deleted {
+		v.dirty = 0
+		v.loaded = false
+		v.deleted = false
+		return nil
 	}
 {{- range .UpdateFields }}
 	v.orig{{ .MethodName }} = v.{{ .Name }}

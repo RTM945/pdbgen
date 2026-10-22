@@ -285,7 +285,8 @@ func GetCachedRecordAs[T Flusher](ctx context.Context, tableName string, id int6
 - 唯一索引查询（`GetByYyy`）仍先查库，再靠 `GetOrAddCachedRecord` 解析成已有对象。
 - `SnapshotState()` / `RestoreState()` / `ResetNew()` 已生成；第一次登记时保存快照，回滚时恢复。
 - `Insert` 在发 SQL 前 `RegisterNew`（保存插入前状态），成功后回填主键并更新身份表；回滚时 `ResetNew`。
-- `FlushStmt` / `FlushDone` 暂不变。
+- 生成 `DeleteBy<PK>`：先 `GetBy<PK>`（缓存优先）再调用实体 `Delete()`；找不到返回 false。
+- `FlushStmt` 在标记删除时返回 `DELETE`；`FlushDone` 把对象置为未加载。`GetById` / `QueryOne` / `QueryList` 过滤 `IsDeleted()`。
 
 ## 8. 分阶段落地
 

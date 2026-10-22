@@ -18,7 +18,8 @@ func (r *testRecord) SnapshotState() RecordState { return *r }
 func (r *testRecord) RestoreState(state RecordState) {
 	*r = state.(testRecord)
 }
-func (r *testRecord) ResetNew() { r.id = 0 }
+func (r *testRecord) ResetNew()       { r.id = 0 }
+func (r *testRecord) IsDeleted() bool { return false }
 
 type otherRecord struct {
 	testRecord

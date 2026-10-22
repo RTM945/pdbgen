@@ -9,9 +9,10 @@ import (
 // rowStub 是 dbctx.Flusher 的最小实现，用来单独验证 Transaction 的缓存记录解析，
 // 不依赖数据库和生成代码。
 type rowStub struct {
-	table string
-	id    int64
-	value int
+	table   string
+	id      int64
+	value   int
+	deleted bool
 }
 
 func (s *rowStub) TableName() string { return s.table }
@@ -28,7 +29,9 @@ func (s *rowStub) SnapshotState() dbctx.RecordState { return *s }
 
 func (s *rowStub) RestoreState(state dbctx.RecordState) { *s = state.(rowStub) }
 
-func (s *rowStub) ResetNew() { s.id = 0 }
+func (s *rowStub) ResetNew() { s.id = 0; s.deleted = false }
+
+func (s *rowStub) IsDeleted() bool { return s.deleted }
 
 // TestAddCachedRecordReturnsExisting 同一行的第二个对象不会登记，
 // 返回第一次登记的对象（xdb: getCachedTRecord 命中后直接用已有记录）。

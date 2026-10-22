@@ -58,6 +58,10 @@ type Flusher interface {
 
 	// ResetNew 把 Insert 回滚后的新对象恢复成"未加载"状态。
 	ResetNew()
+
+	// IsDeleted 报告这一行是否在本次事务里被标记删除。
+	// QueryOne / QueryList 会据此过滤掉已删除的记录。
+	IsDeleted() bool
 }
 
 // Transaction 是一次业务事务的工作集：身份表、脏对象、回滚和提交后任务。
@@ -254,7 +258,11 @@ func QueryOne[T Flusher](
 		}
 		panic(err)
 	}
-	return GetOrAddCachedRecord(ctx, obj)
+	obj = GetOrAddCachedRecord(ctx, obj)
+	if obj.IsDeleted() {
+		return zero
+	}
+	return obj
 }
 
 // QueryList 是 ListByXxx/SelectListByXxx/GetAll/SelectAll 的生成代码公共实现。
@@ -277,7 +285,11 @@ func QueryList[T Flusher](
 		if err != nil {
 			panic(err)
 		}
-		result = append(result, GetOrAddCachedRecord(ctx, obj))
+		obj = GetOrAddCachedRecord(ctx, obj)
+		if obj.IsDeleted() {
+			continue
+		}
+		result = append(result, obj)
 	}
 	if err := rows.Err(); err != nil {
 		panic(err)

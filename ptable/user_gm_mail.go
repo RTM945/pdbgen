@@ -37,6 +37,7 @@ type GMMail struct {
 	userCreatedAt     int64
 	condition         string
 	loaded            bool
+	deleted           bool
 	origParams        string
 	origAwardList     string
 	origStartAt       int64
@@ -57,6 +58,7 @@ type gMMailState struct {
 	userCreatedAt     int64
 	condition         string
 	loaded            bool
+	deleted           bool
 	origParams        string
 	origAwardList     string
 	origStartAt       int64
@@ -190,7 +192,21 @@ func (o *GMMail) ResetToLoaded() {
 	o.channel = o.origChannel
 	o.userCreatedAt = o.origUserCreatedAt
 	o.condition = o.origCondition
+	o.deleted = false
 	o.dirty = 0
+}
+
+// Delete 把这一行标记为待删除；实际 DELETE 在事务提交前由 flush 统一发出。
+func (v *GMMail) Delete() {
+	if !v.loaded || v.deleted {
+		return
+	}
+	v.deleted = true
+}
+
+// IsDeleted 报告这一行是否在本次事务里被标记删除。
+func (v *GMMail) IsDeleted() bool {
+	return v.deleted
 }
 
 func (v *GMMail) SnapshotState() dbctx.RecordState {
@@ -204,6 +220,7 @@ func (v *GMMail) SnapshotState() dbctx.RecordState {
 		userCreatedAt:     v.userCreatedAt,
 		condition:         v.condition,
 		loaded:            v.loaded,
+		deleted:           v.deleted,
 		origParams:        v.origParams,
 		origAwardList:     v.origAwardList,
 		origStartAt:       v.origStartAt,
@@ -226,6 +243,7 @@ func (v *GMMail) RestoreState(state dbctx.RecordState) {
 	v.userCreatedAt = s.userCreatedAt
 	v.condition = s.condition
 	v.loaded = s.loaded
+	v.deleted = s.deleted
 	v.origParams = s.origParams
 	v.origAwardList = s.origAwardList
 	v.origStartAt = s.origStartAt
@@ -240,6 +258,7 @@ func (v *GMMail) RestoreState(state dbctx.RecordState) {
 func (v *GMMail) ResetNew() {
 	v.id = 0
 	v.loaded = false
+	v.deleted = false
 	v.dirty = 0
 }
 
@@ -309,6 +328,9 @@ func (o gMMail) GetById(
 	id int64,
 ) *GMMail {
 	if v, ok := dbctx.GetCachedRecordAs[*GMMail](ctx, "user_gm_mail", id); ok {
+		if v.IsDeleted() {
+			return nil
+		}
 		return v
 	}
 	return o.getId(
@@ -327,6 +349,20 @@ func (o gMMail) SelectById(
 		dbctx.QuerierFromCtx(ctx),
 		id,
 	)
+}
+
+// DeleteById 在事务里按主键标记删除；找不到返回 false。
+// 实际 DELETE 在事务提交前由 flush 统一发出，失败时由 memento 恢复。
+func (o gMMail) DeleteById(
+	ctx context.Context,
+	id int64,
+) bool {
+	v := o.GetById(ctx, id)
+	if v == nil {
+		return false
+	}
+	v.Delete()
+	return true
 }
 
 func (o gMMail) getAll(
@@ -355,9 +391,15 @@ var ErrGMMailNotFound = errors.New(
 )
 
 // FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
-// Transaction 据此跳过这一行，不占用一次往返。
+// deleted 时返回 DELETE；Transaction 据此跳过没有变化的行。
 func (v *GMMail) FlushStmt() (string, []any) {
-	if !v.loaded || v.dirty == 0 {
+	if !v.loaded {
+		return "", nil
+	}
+	if v.deleted {
+		return "DELETE FROM \"user_gm_mail\" WHERE id = $1", []any{v.id}
+	}
+	if v.dirty == 0 {
 		return "", nil
 	}
 	var sb strings.Builder
@@ -425,11 +467,18 @@ func (v *GMMail) FlushStmt() (string, []any) {
 	return sb.String(), args
 }
 
-// FlushDone 实现 dbctx.Flusher，在对应 UPDATE 执行成功后回调，
-// 同步 orig 快照并清空 dirty；rows == 0 说明这一行已被删除或从未存在。
+// FlushDone 实现 dbctx.Flusher，在对应 UPDATE/DELETE 执行成功后回调。
+// UPDATE 同步 orig 快照并清空 dirty；DELETE 把对象置为未加载。
+// rows == 0 说明这一行已经不存在。
 func (v *GMMail) FlushDone(rows int64) error {
 	if rows == 0 {
 		return ErrGMMailNotFound
+	}
+	if v.deleted {
+		v.dirty = 0
+		v.loaded = false
+		v.deleted = false
+		return nil
 	}
 	v.origParams = v.params
 	v.origAwardList = v.awardList

@@ -35,6 +35,7 @@ type Mail struct {
 	params        string
 	awardList     string
 	loaded        bool
+	deleted       bool
 	origUid       int64
 	origConfId    int32
 	origState     int32
@@ -53,6 +54,7 @@ type mailState struct {
 	params        string
 	awardList     string
 	loaded        bool
+	deleted       bool
 	origUid       int64
 	origConfId    int32
 	origState     int32
@@ -170,7 +172,21 @@ func (o *Mail) ResetToLoaded() {
 	o.receiveAt = o.origReceiveAt
 	o.params = o.origParams
 	o.awardList = o.origAwardList
+	o.deleted = false
 	o.dirty = 0
+}
+
+// Delete 把这一行标记为待删除；实际 DELETE 在事务提交前由 flush 统一发出。
+func (v *Mail) Delete() {
+	if !v.loaded || v.deleted {
+		return
+	}
+	v.deleted = true
+}
+
+// IsDeleted 报告这一行是否在本次事务里被标记删除。
+func (v *Mail) IsDeleted() bool {
+	return v.deleted
 }
 
 func (v *Mail) SnapshotState() dbctx.RecordState {
@@ -183,6 +199,7 @@ func (v *Mail) SnapshotState() dbctx.RecordState {
 		params:        v.params,
 		awardList:     v.awardList,
 		loaded:        v.loaded,
+		deleted:       v.deleted,
 		origUid:       v.origUid,
 		origConfId:    v.origConfId,
 		origState:     v.origState,
@@ -203,6 +220,7 @@ func (v *Mail) RestoreState(state dbctx.RecordState) {
 	v.params = s.params
 	v.awardList = s.awardList
 	v.loaded = s.loaded
+	v.deleted = s.deleted
 	v.origUid = s.origUid
 	v.origConfId = s.origConfId
 	v.origState = s.origState
@@ -216,6 +234,7 @@ func (v *Mail) RestoreState(state dbctx.RecordState) {
 func (v *Mail) ResetNew() {
 	v.id = 0
 	v.loaded = false
+	v.deleted = false
 	v.dirty = 0
 }
 
@@ -282,6 +301,9 @@ func (o mail) GetById(
 	id int64,
 ) *Mail {
 	if v, ok := dbctx.GetCachedRecordAs[*Mail](ctx, "user_mail", id); ok {
+		if v.IsDeleted() {
+			return nil
+		}
 		return v
 	}
 	return o.getId(
@@ -335,6 +357,20 @@ func (o mail) SelectListByUidConfId(
 	)
 }
 
+// DeleteById 在事务里按主键标记删除；找不到返回 false。
+// 实际 DELETE 在事务提交前由 flush 统一发出，失败时由 memento 恢复。
+func (o mail) DeleteById(
+	ctx context.Context,
+	id int64,
+) bool {
+	v := o.GetById(ctx, id)
+	if v == nil {
+		return false
+	}
+	v.Delete()
+	return true
+}
+
 func (o mail) getAll(
 	ctx context.Context,
 	q dbctx.Querier,
@@ -361,9 +397,15 @@ var ErrMailNotFound = errors.New(
 )
 
 // FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
-// Transaction 据此跳过这一行，不占用一次往返。
+// deleted 时返回 DELETE；Transaction 据此跳过没有变化的行。
 func (v *Mail) FlushStmt() (string, []any) {
-	if !v.loaded || v.dirty == 0 {
+	if !v.loaded {
+		return "", nil
+	}
+	if v.deleted {
+		return "DELETE FROM \"user_mail\" WHERE id = $1", []any{v.id}
+	}
+	if v.dirty == 0 {
 		return "", nil
 	}
 	var sb strings.Builder
@@ -423,11 +465,18 @@ func (v *Mail) FlushStmt() (string, []any) {
 	return sb.String(), args
 }
 
-// FlushDone 实现 dbctx.Flusher，在对应 UPDATE 执行成功后回调，
-// 同步 orig 快照并清空 dirty；rows == 0 说明这一行已被删除或从未存在。
+// FlushDone 实现 dbctx.Flusher，在对应 UPDATE/DELETE 执行成功后回调。
+// UPDATE 同步 orig 快照并清空 dirty；DELETE 把对象置为未加载。
+// rows == 0 说明这一行已经不存在。
 func (v *Mail) FlushDone(rows int64) error {
 	if rows == 0 {
 		return ErrMailNotFound
+	}
+	if v.deleted {
+		v.dirty = 0
+		v.loaded = false
+		v.deleted = false
+		return nil
 	}
 	v.origUid = v.uid
 	v.origConfId = v.confId

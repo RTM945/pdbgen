@@ -136,13 +136,15 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 |---|---|
 | `NewXxx()` | 空对象，没有身份 |
 | `GetById` / `SelectById` | 主键查询；`GetById` 在事务里先查身份表，命中不发 SQL |
+| `DeleteById` / `DeleteBy<PK>` | 先 `GetBy<PK>`（缓存优先），找不到返回 false；找到后标记删除 |
 | `GetByYyy` / `SelectByYyy` | **unique 索引**查询（`index unique="true"`） |
 | `ListByYyy` / `SelectListByYyy` | **非 unique 索引**查询，返回 `[]*Xxx` |
 | `GetAll` / `SelectAll` | 全表，返回 `[]*Xxx` |
 | `SetXxx` / `Xxx()` | 写入（值没变不置脏位）/ 读取 |
 | `TableName()` | 表名常量，实现 `dbctx.Flusher`，供身份表解析用 |
 | `Identity()` | 主键值，0 表示还没回填（还没 `Insert`），不参与身份表解析 |
-| `FlushStmt()` / `FlushDone()` | 实现 `dbctx.Flusher`，只拼脏列 |
+| `Delete()` / `IsDeleted()` | 标记删除 / 查询删除状态 |
+| `FlushStmt()` / `FlushDone()` | 只拼脏列；标记删除时返回 `DELETE`，`FlushDone` 把对象置为未加载 |
 | `SnapshotState()` / `RestoreState()` | 整条实体快照；事务失败时由 `Transaction.Rollback` 恢复 |
 | `ResetNew()` | `Insert` 回滚后恢复成未加载状态（自增主键清零） |
 | `ResetToLoaded()` | 手动回到 last-loaded 快照；事务级回滚用 `Transaction.Rollback` |
@@ -150,6 +152,8 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 | `Update()` | 绕过 Transaction 的立即落库入口，生成代码内部不用 |
 
 改 `unique` 会改变生成的 API 形态（单行 ↔ 列表）。列表查询返回的元素在事务内都会登记进身份表；再对同一行单独 `GetById` 会返回列表里的同一个指针，不会产生第二个对象。
+
+删除是延迟的：`Delete()` / `DeleteById` 只标记，提交前由 flush 统一发 `DELETE`；同一个事务内 `GetById` / 唯一索引 / 列表查询都会过滤掉已删除的记录；事务回滚时 memento 把对象恢复成未删除状态。
 
 ## 5. 已知缺口
 
@@ -163,6 +167,14 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 - **Procedure 与 Transaction 的职责划分与命名**：[design-procedure-transaction.md](design-procedure-transaction.md)（提案，Phase 1-5 已实施）。实施时并入本文正文，并在变更记录里留痕。
 
 ## 7. 变更记录
+
+### 2026-10-22 生成 Delete / DeleteById
+
+- **改了什么**：实体增加 `deleted` 状态和 `Delete()` / `IsDeleted()`；`FlushStmt` 在 deleted 时返回 `DELETE`；`FlushDone` 处理删除；`GetById` / `QueryOne` / `QueryList` 过滤已删除记录；生成 `DeleteBy<PK>`（主键为 `id` 时是 `DeleteById`），先 `GetBy<PK>`（缓存优先）再标记；`dbctx.Flusher` 增加 `IsDeleted()`。
+- **为什么**：业务需要删除行，同时保持工作单元批量 flush、身份表和 memento 回滚语义。
+- **影响范围**：删除延迟到提交前 flush；同一事务内查询看不到已删除行；回滚恢复对象；找不到返回 false；冷行 `DeleteById` 会多一次 `GetBy<PK>` 的 SELECT。
+- **验证状态**：`go build/vet/test` 通过；`ptable/delete_test.go` 覆盖 `Delete` / `FlushStmt` / `FlushDone` / 快照恢复；真实 PG 集成测试覆盖提交、缺失、回滚、同事务隐藏、Insert 后删除。
+- **未验证**：无。
 
 ### 2026-10-20 明确不自动重试
 

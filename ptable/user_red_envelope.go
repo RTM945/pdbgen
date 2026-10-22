@@ -33,6 +33,7 @@ type RedEnvelope struct {
 	todayCount        int32
 	total             int32
 	loaded            bool
+	deleted           bool
 	origUid           int64
 	origActId         int32
 	origLastRefreshAt int64
@@ -49,6 +50,7 @@ type redEnvelopeState struct {
 	todayCount        int32
 	total             int32
 	loaded            bool
+	deleted           bool
 	origUid           int64
 	origActId         int32
 	origLastRefreshAt int64
@@ -150,7 +152,21 @@ func (o *RedEnvelope) ResetToLoaded() {
 	o.lastRefreshAt = o.origLastRefreshAt
 	o.todayCount = o.origTodayCount
 	o.total = o.origTotal
+	o.deleted = false
 	o.dirty = 0
+}
+
+// Delete 把这一行标记为待删除；实际 DELETE 在事务提交前由 flush 统一发出。
+func (v *RedEnvelope) Delete() {
+	if !v.loaded || v.deleted {
+		return
+	}
+	v.deleted = true
+}
+
+// IsDeleted 报告这一行是否在本次事务里被标记删除。
+func (v *RedEnvelope) IsDeleted() bool {
+	return v.deleted
 }
 
 func (v *RedEnvelope) SnapshotState() dbctx.RecordState {
@@ -162,6 +178,7 @@ func (v *RedEnvelope) SnapshotState() dbctx.RecordState {
 		todayCount:        v.todayCount,
 		total:             v.total,
 		loaded:            v.loaded,
+		deleted:           v.deleted,
 		origUid:           v.origUid,
 		origActId:         v.origActId,
 		origLastRefreshAt: v.origLastRefreshAt,
@@ -180,6 +197,7 @@ func (v *RedEnvelope) RestoreState(state dbctx.RecordState) {
 	v.todayCount = s.todayCount
 	v.total = s.total
 	v.loaded = s.loaded
+	v.deleted = s.deleted
 	v.origUid = s.origUid
 	v.origActId = s.origActId
 	v.origLastRefreshAt = s.origLastRefreshAt
@@ -192,6 +210,7 @@ func (v *RedEnvelope) RestoreState(state dbctx.RecordState) {
 func (v *RedEnvelope) ResetNew() {
 	v.id = 0
 	v.loaded = false
+	v.deleted = false
 	v.dirty = 0
 }
 
@@ -255,6 +274,9 @@ func (o redEnvelope) GetById(
 	id int64,
 ) *RedEnvelope {
 	if v, ok := dbctx.GetCachedRecordAs[*RedEnvelope](ctx, "user_red_envelope", id); ok {
+		if v.IsDeleted() {
+			return nil
+		}
 		return v
 	}
 	return o.getId(
@@ -308,6 +330,20 @@ func (o redEnvelope) SelectByUidActId(
 	)
 }
 
+// DeleteById 在事务里按主键标记删除；找不到返回 false。
+// 实际 DELETE 在事务提交前由 flush 统一发出，失败时由 memento 恢复。
+func (o redEnvelope) DeleteById(
+	ctx context.Context,
+	id int64,
+) bool {
+	v := o.GetById(ctx, id)
+	if v == nil {
+		return false
+	}
+	v.Delete()
+	return true
+}
+
 func (o redEnvelope) getAll(
 	ctx context.Context,
 	q dbctx.Querier,
@@ -334,9 +370,15 @@ var ErrRedEnvelopeNotFound = errors.New(
 )
 
 // FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
-// Transaction 据此跳过这一行，不占用一次往返。
+// deleted 时返回 DELETE；Transaction 据此跳过没有变化的行。
 func (v *RedEnvelope) FlushStmt() (string, []any) {
-	if !v.loaded || v.dirty == 0 {
+	if !v.loaded {
+		return "", nil
+	}
+	if v.deleted {
+		return "DELETE FROM \"user_red_envelope\" WHERE id = $1", []any{v.id}
+	}
+	if v.dirty == 0 {
 		return "", nil
 	}
 	var sb strings.Builder
@@ -388,11 +430,18 @@ func (v *RedEnvelope) FlushStmt() (string, []any) {
 	return sb.String(), args
 }
 
-// FlushDone 实现 dbctx.Flusher，在对应 UPDATE 执行成功后回调，
-// 同步 orig 快照并清空 dirty；rows == 0 说明这一行已被删除或从未存在。
+// FlushDone 实现 dbctx.Flusher，在对应 UPDATE/DELETE 执行成功后回调。
+// UPDATE 同步 orig 快照并清空 dirty；DELETE 把对象置为未加载。
+// rows == 0 说明这一行已经不存在。
 func (v *RedEnvelope) FlushDone(rows int64) error {
 	if rows == 0 {
 		return ErrRedEnvelopeNotFound
+	}
+	if v.deleted {
+		v.dirty = 0
+		v.loaded = false
+		v.deleted = false
+		return nil
 	}
 	v.origUid = v.uid
 	v.origActId = v.actId
