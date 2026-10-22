@@ -127,8 +127,10 @@ func buildTableGen(schema *readxml.Schema, table readxml.Table) (readxml.TableGe
 		field := readxml.Field{
 			Name:       variable.Name,
 			MethodName: readxml.PascalCase(variable.Name),
-			Column:     readxml.SnakeCase(variable.Name),
-			GoType:     variable.Type,
+			// 列名一律加引号：end / order 这类是 SQL 保留字，
+			// 不加引号生成的 SELECT 直接语法错误。
+			Column: quoteIdent(readxml.SnakeCase(variable.Name)),
+			GoType: variable.Type,
 		}
 
 		fieldMap[variable.Name] = field
