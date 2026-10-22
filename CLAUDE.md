@@ -41,7 +41,7 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL �
 
 - [pdb.xml](pdb.xml) 同时是生成配置和表结构定义：`bean` 声明字段（Go 类型），`table` 把 bean 映射到表名、主键、索引。运行时参数（连接池、各类超时、`showSQL`、`appName`）也在这里。
 - [readxml/xml.go](readxml/xml.go) 解析 XML，并提供命名转换与 `Field`/`TableGen`/`QueryMethod` 这些生成器的中间模型。改 XML 结构时 schema struct 要同步。
-- [gen/ddl/main.go](gen/ddl/main.go) 只做增量：缺的表/列/索引才生成 DDL；已存在的列只做校验（类型不符、XML 要求 NOT NULL 但库里可空 → 直接报错），**不存在任何修改列类型或 DROP 的逻辑**，主键/索引定义对不上也是报错而不是重建。Go 类型映射：`int64→BIGINT`、`int32→INTEGER`、`int16/int8→SMALLINT`、`string→TEXT`，非空列生成 `NOT NULL DEFAULT` 默认值。
+- [gen/ddl/main.go](gen/ddl/main.go) 只做增量：缺的表/列/索引才生成 DDL；已存在的列只做校验（类型不符、XML 要求 NOT NULL 但库里可空 → 直接报错），**不存在任何修改列类型或 DROP 的逻辑**，主键/索引定义对不上也是报错而不是重建。Go 类型映射：`int64→BIGINT`、`int32→INTEGER`、`int16/int8→SMALLINT`、`string→TEXT`、`bool→BOOLEAN`、`float32→REAL`、`float64→DOUBLE PRECISION`，非空列生成 `NOT NULL DEFAULT` 默认值（bool 默认 `false`，数值默认 `0`，文本默认 `''`）。
 - [gen/bean/main.go](gen/bean/main.go) + [gen/bean/template.go](gen/bean/template.go) 生成 `ptable/<表名>.go`。模板是 Go 源码里的一个字符串常量，生成后经 `gofmt` 格式化。
 
 生成代码对表结构的约定：

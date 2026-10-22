@@ -664,6 +664,15 @@ func sqlType(goType string) (columnType string, defaultValue string, err error) 
 	case "string":
 		return "TEXT", "''", nil
 
+	case "bool":
+		return "BOOLEAN", "false", nil
+
+	case "float32":
+		return "REAL", "0", nil
+
+	case "float64":
+		return "DOUBLE PRECISION", "0", nil
+
 	default:
 		return "", "", fmt.Errorf("unsupported Go type %q", goType)
 	}
