@@ -47,7 +47,7 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL �
 生成代码对表结构的约定：
 
 - 复合索引用逗号分隔写在 `index` 的 `variable` 上（`uid,actId`）。**unique 索引生成单行查询 `GetByXxx`/`SelectByXxx`，非 unique 索引生成列表查询 `ListByXxx`/`SelectListByXxx`**，主键固定是 `GetById`/`SelectById`。改 `unique` 会改变生成的 API 形态。
-- 自增主键（`autoIncrement`）不出现在 INSERT 的字段列表里，靠 `RETURNING id` 回填；主键所有情况都不参与 UPDATE。
+- 自增主键（`autoIncrement`）不出现在 INSERT 的字段列表里，靠 `RETURNING id` 回填；主键所有情况都不参与 UPDATE。`primaryKey` 的 `start` / `step` 生成 `START WITH` / `INCREMENT BY`；只影响 identity 首次创建，已存在的 identity 不会被自动修改。
 - `ptable/` 下的文件全部是生成产物，不要手改；改结构要改 `pdb.xml`、必要时改模板，然后重新生成并提交。
 
 ## 运行时架构

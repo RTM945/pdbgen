@@ -59,6 +59,7 @@ type PrimaryKey struct {
 	Variable      string `xml:"variable,attr"`
 	AutoIncrement bool   `xml:"autoIncrement,attr"`
 	Start         int64  `xml:"start,attr"`
+	Step          int64  `xml:"step,attr"`
 }
 
 type Index struct {

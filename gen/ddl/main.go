@@ -400,7 +400,9 @@ func generateMissingTableDDL(b *strings.Builder, schema *readxml.Schema, table r
 
 	// PRIMARY KEY / IDENTITY
 	if table.PrimaryKey != nil {
-		generatePrimaryKeyDDL(b, schema, table)
+		if err := generatePrimaryKeyDDL(b, schema, table); err != nil {
+			return err
+		}
 	}
 
 	// INDEX
@@ -419,7 +421,7 @@ func generatePrimaryKeyDDL(
 	b *strings.Builder,
 	schema *readxml.Schema,
 	table readxml.Table,
-) {
+) error {
 	pk := table.PrimaryKey
 
 	var actions []string
@@ -430,9 +432,11 @@ func generatePrimaryKeyDDL(
 			quoteIdent(readxml.SnakeCase(pk.Variable)),
 		)
 
-		if pk.Start != 0 {
-			identity += fmt.Sprintf(" (START WITH %d)", pk.Start)
+		options, err := identityOptions(pk.Start, pk.Step)
+		if err != nil {
+			return fmt.Errorf("table %s primary key: %w", table.Name, err)
 		}
+		identity += options
 
 		actions = append(actions, identity)
 	}
@@ -453,6 +457,7 @@ func generatePrimaryKeyDDL(
 		quoteIdent(table.Name),
 		strings.Join(actions, ",\n\t"),
 	)
+	return nil
 }
 
 func generateIndexDDL(
@@ -581,7 +586,9 @@ func generateAlterDDL(b *strings.Builder, schema *readxml.Schema, table readxml.
 
 	if table.PrimaryKey != nil {
 		if dbTable.PrimaryKey == nil {
-			generatePrimaryKeyDDL(b, schema, table)
+			if err := generatePrimaryKeyDDL(b, schema, table); err != nil {
+				return err
+			}
 		} else {
 			if dbTable.PrimaryKey.Name != primaryKeyName(table) {
 				return fmt.Errorf("table %s primary key name mismatch: db=%s xml=%s", table.Name, dbTable.PrimaryKey.Name, primaryKeyName(table))
@@ -600,11 +607,13 @@ func generateAlterDDL(b *strings.Builder, schema *readxml.Schema, table readxml.
 			column := dbTable.Columns[columnName]
 
 			if !column.IsIdentity {
-				identity := "ALTER COLUMN " + quoteIdent(columnName) + " ADD GENERATED ALWAYS AS IDENTITY"
-
-				if table.PrimaryKey.Start != 0 {
-					identity += fmt.Sprintf(" (START WITH %d)", table.PrimaryKey.Start)
+				options, err := identityOptions(table.PrimaryKey.Start, table.PrimaryKey.Step)
+				if err != nil {
+					return fmt.Errorf("table %s primary key: %w", table.Name, err)
 				}
+
+				identity := "ALTER COLUMN " + quoteIdent(columnName) +
+					" ADD GENERATED ALWAYS AS IDENTITY" + options
 
 				fmt.Fprintf(
 					b,
@@ -645,6 +654,26 @@ func generateAlterDDL(b *strings.Builder, schema *readxml.Schema, table readxml.
 	}
 
 	return nil
+}
+
+// identityOptions 生成 ADD GENERATED ALWAYS AS IDENTITY 后面的选项。
+// step <= 1 时省略 INCREMENT BY（PostgreSQL 默认就是 1）。
+func identityOptions(start, step int64) (string, error) {
+	if step < 0 {
+		return "", fmt.Errorf("step must be >= 0")
+	}
+
+	var parts []string
+	if start != 0 {
+		parts = append(parts, fmt.Sprintf("START WITH %d", start))
+	}
+	if step > 1 {
+		parts = append(parts, fmt.Sprintf("INCREMENT BY %d", step))
+	}
+	if len(parts) == 0 {
+		return "", nil
+	}
+	return " (" + strings.Join(parts, " ") + ")", nil
 }
 
 func sqlType(goType string) (columnType string, defaultValue string, err error) {

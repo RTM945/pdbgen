@@ -35,3 +35,36 @@ func TestSQLType(t *testing.T) {
 		t.Fatal("unsupported type should return an error")
 	}
 }
+
+func TestIdentityOptions(t *testing.T) {
+	cases := []struct {
+		start   int64
+		step    int64
+		want    string
+		wantErr bool
+	}{
+		{0, 0, "", false},
+		{1000, 0, " (START WITH 1000)", false},
+		{0, 10, " (INCREMENT BY 10)", false},
+		{1000, 10, " (START WITH 1000 INCREMENT BY 10)", false},
+		{1000, 1, " (START WITH 1000)", false},
+		{0, 1, "", false},
+		{0, -1, "", true},
+	}
+
+	for _, c := range cases {
+		got, err := identityOptions(c.start, c.step)
+		if c.wantErr {
+			if err == nil {
+				t.Fatalf("start=%d step=%d should return an error", c.start, c.step)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("start=%d step=%d failed: %v", c.start, c.step, err)
+		}
+		if got != c.want {
+			t.Fatalf("start=%d step=%d = %q, want %q", c.start, c.step, got, c.want)
+		}
+	}
+}
