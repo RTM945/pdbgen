@@ -275,7 +275,7 @@ func (o *GMMail) Identity() int64 {
 	return o.id
 }
 
-const selectColumnsGMMail = "id, params, award_list, start_at, end_at, channel, user_created_at, condition"
+const selectColumnsGMMail = "\"id\", \"params\", \"award_list\", \"start_at\", \"end_at\", \"channel\", \"user_created_at\", \"condition\""
 
 func scanGMMail(s dbctx.Scanner) (*GMMail, error) {
 	var (
@@ -319,7 +319,7 @@ func (o gMMail) getId(
 ) *GMMail {
 	const query = "SELECT " + selectColumnsGMMail +
 		" FROM \"user_gm_mail\"" +
-		" WHERE id = $1"
+		" WHERE \"id\" = $1"
 	return dbctx.QueryOne(ctx, q, query, scanGMMail, id)
 }
 
@@ -397,7 +397,7 @@ func (v *GMMail) FlushStmt() (string, []any) {
 		return "", nil
 	}
 	if v.deleted {
-		return "DELETE FROM \"user_gm_mail\" WHERE id = $1", []any{v.id}
+		return "DELETE FROM \"user_gm_mail\" WHERE \"id\" = $1", []any{v.id}
 	}
 	if v.dirty == 0 {
 		return "", nil
@@ -410,7 +410,7 @@ func (v *GMMail) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.params)
-		sb.WriteString("params = $")
+		sb.WriteString("\"params\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyGMMailAwardList != 0 {
@@ -418,7 +418,7 @@ func (v *GMMail) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.awardList)
-		sb.WriteString("award_list = $")
+		sb.WriteString("\"award_list\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyGMMailStartAt != 0 {
@@ -426,7 +426,7 @@ func (v *GMMail) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.startAt)
-		sb.WriteString("start_at = $")
+		sb.WriteString("\"start_at\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyGMMailEndAt != 0 {
@@ -434,7 +434,7 @@ func (v *GMMail) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.endAt)
-		sb.WriteString("end_at = $")
+		sb.WriteString("\"end_at\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyGMMailChannel != 0 {
@@ -442,7 +442,7 @@ func (v *GMMail) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.channel)
-		sb.WriteString("channel = $")
+		sb.WriteString("\"channel\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyGMMailUserCreatedAt != 0 {
@@ -450,7 +450,7 @@ func (v *GMMail) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.userCreatedAt)
-		sb.WriteString("user_created_at = $")
+		sb.WriteString("\"user_created_at\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyGMMailCondition != 0 {
@@ -458,11 +458,11 @@ func (v *GMMail) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.condition)
-		sb.WriteString("condition = $")
+		sb.WriteString("\"condition\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	args = append(args, v.id)
-	sb.WriteString(" WHERE id = $")
+	sb.WriteString(" WHERE \"id\" = $")
 	sb.WriteString(strconv.Itoa(len(args)))
 	return sb.String(), args
 }
@@ -515,9 +515,9 @@ func (o gMMail) Insert(
 	dbctx.RegisterNew(ctx, v)
 	tx := dbctx.SQLTxFromCtx(ctx)
 	const query = "INSERT INTO \"user_gm_mail\" " +
-		"(params, award_list, start_at, end_at, channel, user_created_at, condition) " +
+		"(\"params\", \"award_list\", \"start_at\", \"end_at\", \"channel\", \"user_created_at\", \"condition\") " +
 		"VALUES ($1, $2, $3, $4, $5, $6, $7)" +
-		" RETURNING id"
+		" RETURNING \"id\""
 
 	row := tx.QueryRow(
 		ctx,

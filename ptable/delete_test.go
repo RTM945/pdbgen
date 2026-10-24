@@ -14,7 +14,7 @@ func TestRedEnvelopeDeleteFlush(t *testing.T) {
 	}
 
 	stmt, args := v.FlushStmt()
-	want := `DELETE FROM "user_red_envelope" WHERE id = $1`
+	want := `DELETE FROM "user_red_envelope" WHERE "id" = $1`
 	if stmt != want {
 		t.Fatalf("DELETE 语句不符，期望 %q，实际 %q", want, stmt)
 	}

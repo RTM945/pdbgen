@@ -251,7 +251,7 @@ func (o *Mail) Identity() int64 {
 	return o.id
 }
 
-const selectColumnsMail = "id, uid, conf_id, state, receive_at, params, award_list"
+const selectColumnsMail = "\"id\", \"uid\", \"conf_id\", \"state\", \"receive_at\", \"params\", \"award_list\""
 
 func scanMail(s dbctx.Scanner) (*Mail, error) {
 	var (
@@ -292,7 +292,7 @@ func (o mail) getId(
 ) *Mail {
 	const query = "SELECT " + selectColumnsMail +
 		" FROM \"user_mail\"" +
-		" WHERE id = $1"
+		" WHERE \"id\" = $1"
 	return dbctx.QueryOne(ctx, q, query, scanMail, id)
 }
 
@@ -331,7 +331,7 @@ func (o mail) listUidConfId(
 ) []*Mail {
 	const query = "SELECT " + selectColumnsMail +
 		" FROM \"user_mail\"" +
-		" WHERE uid = $1 AND conf_id = $2"
+		" WHERE \"uid\" = $1 AND \"conf_id\" = $2"
 	return dbctx.QueryList(ctx, q, query, scanMail, uid, confId)
 }
 
@@ -403,7 +403,7 @@ func (v *Mail) FlushStmt() (string, []any) {
 		return "", nil
 	}
 	if v.deleted {
-		return "DELETE FROM \"user_mail\" WHERE id = $1", []any{v.id}
+		return "DELETE FROM \"user_mail\" WHERE \"id\" = $1", []any{v.id}
 	}
 	if v.dirty == 0 {
 		return "", nil
@@ -416,7 +416,7 @@ func (v *Mail) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.uid)
-		sb.WriteString("uid = $")
+		sb.WriteString("\"uid\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyMailConfId != 0 {
@@ -424,7 +424,7 @@ func (v *Mail) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.confId)
-		sb.WriteString("conf_id = $")
+		sb.WriteString("\"conf_id\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyMailState != 0 {
@@ -432,7 +432,7 @@ func (v *Mail) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.state)
-		sb.WriteString("state = $")
+		sb.WriteString("\"state\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyMailReceiveAt != 0 {
@@ -440,7 +440,7 @@ func (v *Mail) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.receiveAt)
-		sb.WriteString("receive_at = $")
+		sb.WriteString("\"receive_at\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyMailParams != 0 {
@@ -448,7 +448,7 @@ func (v *Mail) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.params)
-		sb.WriteString("params = $")
+		sb.WriteString("\"params\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyMailAwardList != 0 {
@@ -456,11 +456,11 @@ func (v *Mail) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.awardList)
-		sb.WriteString("award_list = $")
+		sb.WriteString("\"award_list\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	args = append(args, v.id)
-	sb.WriteString(" WHERE id = $")
+	sb.WriteString(" WHERE \"id\" = $")
 	sb.WriteString(strconv.Itoa(len(args)))
 	return sb.String(), args
 }
@@ -512,9 +512,9 @@ func (o mail) Insert(
 	dbctx.RegisterNew(ctx, v)
 	tx := dbctx.SQLTxFromCtx(ctx)
 	const query = "INSERT INTO \"user_mail\" " +
-		"(uid, conf_id, state, receive_at, params, award_list) " +
+		"(\"uid\", \"conf_id\", \"state\", \"receive_at\", \"params\", \"award_list\") " +
 		"VALUES ($1, $2, $3, $4, $5, $6)" +
-		" RETURNING id"
+		" RETURNING \"id\""
 
 	row := tx.QueryRow(
 		ctx,

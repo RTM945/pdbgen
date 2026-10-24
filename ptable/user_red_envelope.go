@@ -227,7 +227,7 @@ func (o *RedEnvelope) Identity() int64 {
 	return o.id
 }
 
-const selectColumnsRedEnvelope = "id, uid, act_id, last_refresh_at, today_count, total"
+const selectColumnsRedEnvelope = "\"id\", \"uid\", \"act_id\", \"last_refresh_at\", \"today_count\", \"total\""
 
 func scanRedEnvelope(s dbctx.Scanner) (*RedEnvelope, error) {
 	var (
@@ -265,7 +265,7 @@ func (o redEnvelope) getId(
 ) *RedEnvelope {
 	const query = "SELECT " + selectColumnsRedEnvelope +
 		" FROM \"user_red_envelope\"" +
-		" WHERE id = $1"
+		" WHERE \"id\" = $1"
 	return dbctx.QueryOne(ctx, q, query, scanRedEnvelope, id)
 }
 
@@ -304,7 +304,7 @@ func (o redEnvelope) getUidActId(
 ) *RedEnvelope {
 	const query = "SELECT " + selectColumnsRedEnvelope +
 		" FROM \"user_red_envelope\"" +
-		" WHERE uid = $1 AND act_id = $2"
+		" WHERE \"uid\" = $1 AND \"act_id\" = $2"
 	return dbctx.QueryOne(ctx, q, query, scanRedEnvelope, uid, actId)
 }
 
@@ -376,7 +376,7 @@ func (v *RedEnvelope) FlushStmt() (string, []any) {
 		return "", nil
 	}
 	if v.deleted {
-		return "DELETE FROM \"user_red_envelope\" WHERE id = $1", []any{v.id}
+		return "DELETE FROM \"user_red_envelope\" WHERE \"id\" = $1", []any{v.id}
 	}
 	if v.dirty == 0 {
 		return "", nil
@@ -389,7 +389,7 @@ func (v *RedEnvelope) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.uid)
-		sb.WriteString("uid = $")
+		sb.WriteString("\"uid\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyRedEnvelopeActId != 0 {
@@ -397,7 +397,7 @@ func (v *RedEnvelope) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.actId)
-		sb.WriteString("act_id = $")
+		sb.WriteString("\"act_id\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyRedEnvelopeLastRefreshAt != 0 {
@@ -405,7 +405,7 @@ func (v *RedEnvelope) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.lastRefreshAt)
-		sb.WriteString("last_refresh_at = $")
+		sb.WriteString("\"last_refresh_at\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyRedEnvelopeTodayCount != 0 {
@@ -413,7 +413,7 @@ func (v *RedEnvelope) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.todayCount)
-		sb.WriteString("today_count = $")
+		sb.WriteString("\"today_count\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyRedEnvelopeTotal != 0 {
@@ -421,11 +421,11 @@ func (v *RedEnvelope) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.total)
-		sb.WriteString("total = $")
+		sb.WriteString("\"total\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	args = append(args, v.id)
-	sb.WriteString(" WHERE id = $")
+	sb.WriteString(" WHERE \"id\" = $")
 	sb.WriteString(strconv.Itoa(len(args)))
 	return sb.String(), args
 }
@@ -476,9 +476,9 @@ func (o redEnvelope) Insert(
 	dbctx.RegisterNew(ctx, v)
 	tx := dbctx.SQLTxFromCtx(ctx)
 	const query = "INSERT INTO \"user_red_envelope\" " +
-		"(uid, act_id, last_refresh_at, today_count, total) " +
+		"(\"uid\", \"act_id\", \"last_refresh_at\", \"today_count\", \"total\") " +
 		"VALUES ($1, $2, $3, $4, $5)" +
-		" RETURNING id"
+		" RETURNING \"id\""
 
 	row := tx.QueryRow(
 		ctx,

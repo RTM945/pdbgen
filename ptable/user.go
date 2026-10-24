@@ -203,7 +203,7 @@ func (o *User) Identity() int64 {
 	return o.id
 }
 
-const selectColumnsUser = "id, name, last_login_at, created_at, token"
+const selectColumnsUser = "\"id\", \"name\", \"last_login_at\", \"created_at\", \"token\""
 
 func scanUser(s dbctx.Scanner) (*User, error) {
 	var (
@@ -238,7 +238,7 @@ func (o user) getId(
 ) *User {
 	const query = "SELECT " + selectColumnsUser +
 		" FROM \"user\"" +
-		" WHERE id = $1"
+		" WHERE \"id\" = $1"
 	return dbctx.QueryOne(ctx, q, query, scanUser, id)
 }
 
@@ -316,7 +316,7 @@ func (v *User) FlushStmt() (string, []any) {
 		return "", nil
 	}
 	if v.deleted {
-		return "DELETE FROM \"user\" WHERE id = $1", []any{v.id}
+		return "DELETE FROM \"user\" WHERE \"id\" = $1", []any{v.id}
 	}
 	if v.dirty == 0 {
 		return "", nil
@@ -329,7 +329,7 @@ func (v *User) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.name)
-		sb.WriteString("name = $")
+		sb.WriteString("\"name\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyUserLastLoginAt != 0 {
@@ -337,7 +337,7 @@ func (v *User) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.lastLoginAt)
-		sb.WriteString("last_login_at = $")
+		sb.WriteString("\"last_login_at\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyUserCreatedAt != 0 {
@@ -345,7 +345,7 @@ func (v *User) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.createdAt)
-		sb.WriteString("created_at = $")
+		sb.WriteString("\"created_at\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	if v.dirty&dirtyUserToken != 0 {
@@ -353,11 +353,11 @@ func (v *User) FlushStmt() (string, []any) {
 			sb.WriteString(", ")
 		}
 		args = append(args, v.token)
-		sb.WriteString("token = $")
+		sb.WriteString("\"token\" = $")
 		sb.WriteString(strconv.Itoa(len(args)))
 	}
 	args = append(args, v.id)
-	sb.WriteString(" WHERE id = $")
+	sb.WriteString(" WHERE \"id\" = $")
 	sb.WriteString(strconv.Itoa(len(args)))
 	return sb.String(), args
 }
@@ -407,9 +407,9 @@ func (o user) Insert(
 	dbctx.RegisterNew(ctx, v)
 	tx := dbctx.SQLTxFromCtx(ctx)
 	const query = "INSERT INTO \"user\" " +
-		"(name, last_login_at, created_at, token) " +
+		"(\"name\", \"last_login_at\", \"created_at\", \"token\") " +
 		"VALUES ($1, $2, $3, $4)" +
-		" RETURNING id"
+		" RETURNING \"id\""
 
 	row := tx.QueryRow(
 		ctx,

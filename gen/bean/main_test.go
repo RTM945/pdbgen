@@ -38,9 +38,9 @@ func TestGenerateTableSupportsBoolAndFloats(t *testing.T) {
 		"v.flag",
 		"v.ratio",
 		"v.score",
-		"flag = $",
-		"ratio = $",
-		"score = $",
+		`\"flag\" = $`,
+		`\"ratio\" = $`,
+		`\"score\" = $`,
 	} {
 		if !bytes.Contains(out, []byte(want)) {
 			t.Fatalf("generated source missing %q:\n%s", want, out)
