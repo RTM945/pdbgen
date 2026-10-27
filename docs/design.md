@@ -24,7 +24,7 @@ pdbgen 是面向游戏服务端的 PostgreSQL 数据访问框架：`pdb.xml` 定
 
 - 命中时返回已有对象，**丢弃**这次新扫描出来的对象；
 - 未命中时把它放进事务缓存并返回；
-- 非事务查询（`SelectXxx` / `Query`）没有 Transaction，直接返回扫描出来的对象。
+- 非事务查询（`SelectXxx`）没有 Transaction，直接返回扫描出来的对象，并把它标记为脱离事务（见 2.7）。
 
 这对应 xdb 的两步：`Transaction.getCachedTRecord` 命中就直接用，未命中再 `addCachedTRecord`；生成的实体相当于 xdb 的 `TRecord`。
 
@@ -48,53 +48,70 @@ b.SetTotal(42)
 - 同一个指针重复登记只算一次，不会重复进 flush 列表。
 - `Identity() == 0` 的对象（自增主键还没回填、还没 `Insert`）没有身份，不进身份表；`Insert` 回填主键后会再登记一次。
 - 身份表只在事务内有效；跨事务/跨请求不共享。
-- `QueryList` 里如果同一个 `(表名, 主键)` 出现多次，返回的切片里会是同一个指针（列表元素可能重复）。
 
-这条保证替代了早期的"同一行两个对象就 panic"守卫：现在不是报错，而是把第二次扫描出来的对象解析成第一次的记录。`Update()` 绕过事务缓存，仍然直接使用传入的对象。
+这条保证替代了早期的"同一行两个对象就 panic"守卫：现在不是报错，而是把第二次扫描出来的对象解析成第一次的记录。
 
 ### 2.3 落库时机在事务提交前，不在 `SetXxx` 时
 
-`SetXxx` 只改内存 + 置脏位；真正的 UPDATE 由 `WithTxPrepare` 在业务回调返回后统一 flush（`Transaction.Flush`）。所以：
+`SetXxx` / `Delete()` 只改内存；真正的 UPDATE / DELETE 由 `Procedure` 在业务回调返回后统一 flush。`Insert` 例外：它要拿回自增主键，当场执行。所以：
 
-- 事务中途查库看到的是**库里的值**，不是本事务刚改的值；
-- 一次事务里所有脏对象合并成一个 `pgx.Batch` 发出，一次往返；
-- 任何一条失败 → 整体回滚。
+- 一次事务里所有修改合并成一个 `pgx.Batch` 发出，一次往返；任何一条失败（包括 UPDATE / DELETE 没命中任何行，`dbpool.ErrRowNotFound`）→ 整体回滚。
+- 事务中途查库看到的是**库里的值**。框架不去兼容"改了再查"，而是把会读错的写法封死（见 2.7）：
+  - 改了某些列、还没落库，再按这些列做条件查同一张表 → panic（`dbctx.CheckPredicate`）。SELECT 按库里的旧值过滤，会多行或漏行。改别的列不受影响；按主键查走身份表，也不受影响。
+  - 同一事务里删了再插同一个唯一键 → INSERT 先于 DELETE 到达数据库，撞唯一索引，整个事务回滚。这是约定：要"重置"一行就改它的列，不要删了重建。
+  - 业务手写的 SQL 同样只看到库里的值；手写 SQL 要读本事务改过的数据时，把它放到修改之前。
 
 ### 2.4 错误靠 panic 传播，事务边界统一收口
 
-生成代码遇到 pgx 错误直接 panic；`QueryOne` 查不到返回 nil（`ErrNoRows` 不算错误），其他错误 panic。`WithTxPrepare` 的 defer 按"panic 恢复内存+回滚 / 有错恢复内存+回滚 / flush 失败恢复内存+回滚 / commit"的顺序收尾，panic 会**回滚后原样重抛**（要接住它必须包住整个 `WithTx` 调用，放在回调里的 `recover` 接不到）。业务回调里不需要逐个检查 SQL 错误。
+生成代码遇到 pgx 错误直接 panic；`QueryOne` 查不到返回 nil（`ErrNoRows` 不算错误，SQL 日志里也记 INFO），其他错误 panic。`Procedure` 的 defer 在业务返回错误、panic、flush 失败时恢复内存并回滚，panic 会**回滚后原样重抛**（要接住它必须包住整个 `Procedure` / `WithTx` 调用，放在回调里的 `recover` 接不到）。业务回调里不需要逐个检查 SQL 错误。
 
 ### 2.5 `GetXxx` 与 `SelectXxx` 互斥
 
-| | 必须在事务里 | 用哪条连接 | 参与身份表解析 |
-|---|---|---|---|
-| `GetByXxx` / `GetById` | 是（否则 panic） | 事务 | 是 |
-| `SelectByXxx` / `SelectById` / `SelectAll` | 否（是则 panic） | 连接池 | 否 |
-| `dbpool.Query` | 否（是则报错） | 连接池 | 否 |
+| | 必须在事务里 | 用哪条连接 | 参与身份表解析 | 返回的实体 |
+|---|---|---|---|---|
+| `GetByXxx` / `ListByXxx` / `GetAll` / `Insert` | 是（否则 panic） | 事务 | 是 | 可以改 |
+| `SelectByXxx` / `SelectListByXxx` / `SelectAll` | 否（是则 panic），且必须在 `dbpool.Query` 里 | 连接池 | 否 | 只读（脱离事务） |
+| `dbpool.Query` | 否（是则报错） | 连接池 | 否 | — |
 
 事务里从池里另取一条连接读数据，会读到事务未提交前的旧值——所以框架直接把这条路封死。
 
 ### 2.6 失败时恢复内存对象
 
-- 对象第一次进入事务身份表时，`Transaction` 调用生成的 `SnapshotState()` 保存整条快照（字段值 + orig + dirty + id + loaded）。
-- 业务返回错误、panic、或 Flush 失败时，`WithTxPrepare` 先调用 `Transaction.Rollback()` 恢复所有快照，再回滚 SQLTx，最后执行 AfterRollback 钩子。
-- `Insert` 在发 SQL 前调用 `dbctx.RegisterNew`；回滚时这些对象走 `ResetNew`：清主键（自增时）、`loaded=false`、`dirty=0`，并从身份表移除。
-- COMMIT 返回错误时结果不确定：**不回滚内存对象**，也不执行提交/回滚钩子；调用方应丢弃这批对象。
+- 对象第一次登记进事务时（查询返回前，或 `Insert` 发 SQL 前），事务调用 `SnapshotState()` 保存整条快照——生成的实体只有值字段，快照就是一次结构体拷贝。
+- 业务返回错误、panic、flush 失败，或者 PostgreSQL 把 COMMIT 当成了 ROLLBACK（`pgx.ErrTxCommitRollback`，事务之前已经出错）时，`Procedure` 先恢复所有快照，再回滚 SQLTx，最后执行 AfterRollback 钩子。`Insert` 过的对象恢复成插入前的样子（主键 0、未加载），可以在新事务里重新插入。
+- COMMIT 返回其他错误时结果不确定：**不回滚内存对象**，也不执行提交/回滚钩子；调用方应丢弃这批对象。
+
+### 2.7 约定即约束
+
+框架不为不支持的写法做兼容，而是让它们当场失败：
+
+| 写法 | 结果 |
+|---|---|
+| 事务里再开事务（`Procedure` / `WithTx` 嵌套） | 返回 `ErrNestedTransaction`，内层不执行 |
+| 改事务外查出来的实体，或者改已经结束的事务里的实体 | `SetXxx` / `Delete` panic：实体已脱离事务，改了也不会落库 |
+| 改了查询条件列之后再按这些列查同一张表 | panic（见 2.3） |
+| 事务外调用 `GetByXxx` / `Insert` / `dbctx.AfterCommit` / `dbctx.AfterRollback` | panic |
+| 事务里调用 `SelectByXxx` / `dbpool.Query` | panic / 报错 |
+| `Insert` 一个已经插入过或者查出来的对象 | panic |
+| 删了再插同一个唯一键 | 数据库报唯一约束冲突，事务回滚 |
+
+实体脱离事务的时机：事务外查询返回时；事务结束时（提交、回滚、提交结果不确定），事务里登记过的已加载实体全部脱离。新对象（`NewXxx()` 创建、还没插入或插入被回滚）不受影响。
+
+生成器同样只接受框架支持的 schema（见第 4 节）。
 
 ## 3. 事务、锁与超时
 
-- 事务总预算 `transactionTimeoutMs`，`SET LOCAL` 下发 `statement_timeout` / `idle_in_transaction_session_timeout` / `lock_timeout`。
+- `pdb.xml` 的 `statementTimeoutMs` / `idleInTransactionSessionTimeoutMs` / `lockTimeoutMs` 拼进 BEGIN：`BEGIN; SET LOCAL statement_timeout = ...; ...`。不带参数的 Exec 走简单协议，一次往返发完，所以**每个事务都有这三个超时**，加不加锁都一样，也不多花往返。
+- `transactionTimeoutMs` 是客户端预算：一次 `Procedure`（BEGIN 到 COMMIT 前）或一次 `dbpool.Query` 回调的总时长上限。pgx 默认在 ctx 到期时只断开本地连接、**不发 CancelRequest**——服务端的语句要靠 `statement_timeout` 停下来。
+- `dbpool.Query` 没有事务，`SET LOCAL` 管不到；要给它服务端上限，用角色级设置 `ALTER ROLE app SET statement_timeout = '5s'`（经过 pgBouncer 事务池也生效；放在连接参数里会被 pgBouncer 拒绝）。
 - `COMMIT` 用 `context.WithoutCancel(ctx)`：一旦发出就必须等到结果，避免"客户端不知道提交成功没有"导致重试重复发放。
-- 咨询锁是**替代 `SELECT ... FOR UPDATE` 的行级串行手段**，在 `prepare` 钩子里、事务内获取：
-  - `WithTryAdvisoryLock(key)` / `WithTryAdvisoryLock2(ns, id)`：拿不到返回 `ErrAdvisoryLockNotAcquired`；
-  - `WithAdvisoryLock` / `WithAdvisoryLock2`：阻塞等待。
-  - 玩家请求用 try 版，GM/RPC 写请求用阻塞版（README）。
+- 咨询锁是**替代 `SELECT ... FOR UPDATE` 的行级串行手段**，在事务开头获取（见 3.1）。玩家请求用 try 版，GM/RPC 写请求用阻塞版（README）。单 bigint 和双 int32 是两个互不重叠的 key 空间。
 
 **已知限制**：框架一次只挂一把锁，多把锁的获取顺序由业务自己保证；行的 UPDATE 顺序 = 对象注册顺序（首次查询顺序），一次事务锁多把锁时这个顺序会参与死锁判定。当前"一次事务一个 uid 一把锁"的模型下不存在这个问题。
 
 ### 3.1 Procedure 入口
 
-`dbpool.Procedure(ctx, opts, fn)` 是所有事务入口的统一形式：
+`dbpool.Procedure(ctx, opts, fn)` 是事务的唯一入口，`WithTx(ctx, fn)` 是不加锁的简写：
 
 ```go
 type ProcedureOptions struct {
@@ -116,17 +133,17 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 
 - `Timeout` 与 `transactionTimeoutMs` 同时生效时取更早到期的那个；COMMIT 仍然用 `WithoutCancel`，不受这个预算影响。
 - **不自动重试**：try 锁拿不到返回 `ErrAdvisoryLockNotAcquired`，由业务返回"稍后再试"或在上层重试；框架不在请求里空转。blocking 锁由 `lock_timeout` 限制等待。`fn` 只执行一次。
-- `WithTx` / `WithTryAdvisoryLock*` / `WithAdvisoryLock*` 保留为薄封装，底层都走 `Procedure`；`WithTxPrepare` 是 `Procedure` 的底层实现，需要自定义 `prepare` 钩子时直接用它。
+- **不能嵌套**：ctx 里已经有事务时返回 `ErrNestedTransaction`。嵌套事务会从池里另拿一条连接：同一把锁自己等自己，同一行在两个事务里各有一个对象互相覆盖，并发高时连接池互等。
 
 ### 3.2 提交后 / 回滚后任务
 
 `dbctx.AfterCommit(ctx, fn)` / `dbctx.AfterRollback(ctx, fn)` 把任务挂到当前事务：
 
 - **AfterCommit** 只在 COMMIT 明确成功后执行；COMMIT 返回错误时结果不确定，两个钩子都不执行——可能已提交，不能发失败通知；也可能没提交，不能发成功通知。
-- **AfterRollback** 在业务返回错误、panic、或 Flush 失败导致回滚后执行；执行时内存对象已经由 `Transaction.Rollback` 恢复。
+- **AfterRollback** 在业务返回错误、panic、或 flush 失败导致回滚后执行；执行时内存对象已经恢复。
 - **顺序**：都按注册顺序执行；同步执行在调用方 goroutine 上，慢钩子会拖慢请求。
-- **没有事务时**：直接执行（没有提交点可等）。
-- **上下文**：钩子拿到的是调用方 ctx 去掉取消/超时、且不带 SQLTx/Transaction 的副本；保留请求 ID 等值。钩子要查库用 `dbpool.Query`，不要用 `GetByXxx`（事务方法）拿事务 ctx。
+- **只能在事务里注册**：没有事务时 panic——在没有提交点的地方注册"提交后"任务，一般是 ctx 传错了。
+- **上下文**：钩子拿到的是调用方 ctx 去掉取消/超时、且不带事务的副本；保留请求 ID 等值。钩子里可以开新事务（`Procedure`），查库用 `dbpool.Query`。
 - **panic**：单个钩子 panic 只记日志（slog），后续钩子继续执行；已经提交的数据不受影响。
 - **用途**：发包、RPC、事件等外部副作用放 AfterCommit；失败通知放 AfterRollback。不要在钩子里做能失败并需要回滚的业务。
 
@@ -134,39 +151,56 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 
 | 生成物 | 说明 |
 |---|---|
-| `NewXxx()` | 空对象，没有身份 |
+| `NewXxx()` | 新对象，还没有身份；`SetXxx` 之后 `Insert` |
 | `GetById` / `SelectById` | 主键查询；`GetById` 在事务里先查身份表，命中不发 SQL |
-| `DeleteById` / `DeleteBy<PK>` | 先 `GetBy<PK>`（缓存优先），找不到返回 false；找到后标记删除 |
+| `DeleteById` | 先 `GetById`（缓存优先），找不到返回 false；找到后标记删除 |
 | `GetByYyy` / `SelectByYyy` | **unique 索引**查询（`index unique="true"`） |
 | `ListByYyy` / `SelectListByYyy` | **非 unique 索引**查询，返回 `[]*Xxx` |
 | `GetAll` / `SelectAll` | 全表，返回 `[]*Xxx` |
-| `SetXxx` / `Xxx()` | 写入（值没变不置脏位）/ 读取 |
-| `TableName()` | 表名常量，实现 `dbctx.Flusher`，供身份表解析用 |
-| `Identity()` | 主键值，0 表示还没回填（还没 `Insert`），不参与身份表解析 |
+| `SetXxx` / `Xxx()` | 写入（值没变不置脏位；实体脱离事务时 panic）/ 读取 |
 | `Delete()` / `IsDeleted()` | 标记删除 / 查询删除状态 |
-| `FlushStmt()` / `FlushDone()` | 只拼脏列；标记删除时返回 `DELETE`，`FlushDone` 把对象置为未加载 |
-| `SnapshotState()` / `RestoreState()` | 整条实体快照；事务失败时由 `Transaction.Rollback` 恢复 |
-| `ResetNew()` | `Insert` 回滚后恢复成未加载状态（自增主键清零） |
-| `ResetToLoaded()` | 手动回到 last-loaded 快照；事务级回滚用 `Transaction.Rollback` |
-| `Insert()` | `INSERT ... RETURNING <pk>`；先 `RegisterNew`，回填主键后 `GetOrAddCachedRecord` |
-| `Update()` | 绕过 Transaction 的立即落库入口，生成代码内部不用 |
+| `Insert()` | `INSERT ... RETURNING <pk>`，只接受还没插入过的新对象 |
+| `TableName()` / `Identity()` / `FlushStmt()` / `FlushDone()` / `DirtyColumns()` / `SnapshotState()` / `RestoreState()` / `Detach()` | 实现 `dbctx.Flusher`，供运行时使用 |
+
+`pdb.xml` 里 `sensitive="true"` 的 string 列，作为 SQL 参数时包成 `dbctx.Secret`：数据库收到原值，SQL 日志里只打成 `'***'`。
 
 改 `unique` 会改变生成的 API 形态（单行 ↔ 列表）。列表查询返回的元素在事务内都会登记进身份表；再对同一行单独 `GetById` 会返回列表里的同一个指针，不会产生第二个对象。
 
-删除是延迟的：`Delete()` / `DeleteById` 只标记，提交前由 flush 统一发 `DELETE`；同一个事务内 `GetById` / 唯一索引 / 列表查询都会过滤掉已删除的记录；事务回滚时 memento 把对象恢复成未删除状态。
+删除是延迟的：`Delete()` / `DeleteById` 只标记，提交前由 flush 统一发 `DELETE`；同一个事务内 `GetById` / 唯一索引 / 列表查询都会过滤掉已删除的记录；事务回滚时对象恢复成未删除状态。
+
+生成器只接受框架支持的 schema，其余直接报错：
+
+- 主键必须是 `int64` 且 `autoIncrement="true"`（身份表、`Insert` 回填、`GetById` 缓存都按它实现）；
+- 除主键外至少一列，最多 64 列（`dirty` 是 `uint64` 位掩码）；
+- 列名是小写字母开头的 Go 标识符，不能是 Go 关键字（`type` 换成 `typ` / `kind`），不能和生成代码的内部名字冲突（`loaded`、`deleted`、`detached`、`dirty`、`t`、`o`、`q`、`ctx`、`query`，以及 `tableName`、`delete` 这类和实体方法同名的列）；
+- 类型只能是 `int64` / `int32` / `int16` / `int8` / `string` / `bool` / `float32` / `float64`；`sensitive` 只能标在非主键的 string 列上；
+- 同一组列只能有一个索引，也不能和主键相同；一个 bean 只能映射一张表。
 
 ## 5. 已知缺口
 
-1. **嵌套 savepoint / 部分回滚还没实现**：现在只有事务级 memento 回滚（`Transaction.Rollback`）；`ResetToLoaded` 保留给业务手动局部撤销。
-2. **咨询锁 key 的哈希问题**：`hashtext('user', uid)` 用两个 int 拼，uid 超过 int32 会出错；预想改成默认直接用 uid、其他业务锁用生成代码的枚举值（README todo）。
+1. **嵌套 savepoint / 部分回滚没有实现**：只有事务级回滚，嵌套事务直接拒绝（`ErrNestedTransaction`）。
+2. **咨询锁的 bigint key 空间只有一个**：`TryAdvisoryLock(uid)` 和别的业务用 bigint key 的锁会撞号。约定 bigint 形式只给 uid 用，其他业务锁用 `AdvisoryLock2(ns, id)`。（README 里"uid 超过 int32"的问题已经由单 bigint 形式解决。）
 3. **多咨询锁场景下的加锁/更新顺序**：见第 3 节，当前模型下不适用。
-4. **`QueryList` 的重复指针**：同一事务里如果列表查询返回了同一行多次，切片里的元素会是同一个指针；业务如果假定列表元素互不相同，需要自己去重。
+4. **`dbpool.Query` 没有服务端超时**：只有客户端预算，服务端上限要靠角色级 `statement_timeout`（见第 3 节）。
 
 ## 6. 设计提案
 
 - **Procedure 与 Transaction 的职责划分与命名**：[design-procedure-transaction.md](design-procedure-transaction.md)（提案，Phase 1-5 已实施）。实施时并入本文正文，并在变更记录里留痕。
 
 ## 7. 变更记录
+
+### 2026-10-28 约定改成约束；精简运行时和生成代码
+
+- **改了什么**：
+  - 超时：三个 `SET LOCAL` 拼进 BEGIN，所有事务生效（之前只有加锁的事务才下发）；`transactionTimeoutMs` 同时作为 `dbpool.Query` 回调的预算。
+  - 约束：嵌套 `Procedure` 返回 `ErrNestedTransaction`；事务外查出来的实体、事务结束后的实体脱离事务，`SetXxx` / `Delete` panic；改了查询条件列之后再按这些列查同一张表 panic（`dbctx.CheckPredicate`）；`dbctx.AfterCommit` / `AfterRollback` 只能在事务里调用（之前事务外立即执行）；`Insert` 拒绝已经插入过的对象；`pgx.ErrTxCommitRollback` 按回滚处理。
+  - 生成器：只接受 int64 自增主键、合法且不冲突的列名、受支持的类型，索引不能重复，一个 bean 只映射一张表；`sensitive="true"` 的列在 SQL 日志里打成 `'***'`。
+  - SQL 日志：不再把 SQL 当 `Sprintf` 格式串（`LIKE 'a%'`、取模不再乱码）；`nil` 打成 `NULL`；查不到记 INFO 而不是 ERROR。
+  - 精简：删掉 Deprecated 别名、四个 `With*AdvisoryLock*` 薄封装和公开的 `WithTxPrepare`（`Procedure` 是唯一入口）；生成代码去掉 `orig*` 字段、`xxxState` 结构、`loadedXxx`、`ResetToLoaded`、`ResetNew`、`Update` 和每表一个的 `ErrXxxNotFound`（统一为 `dbpool.ErrRowNotFound`），拼 UPDATE 改由 `dbctx.UpdateStmt` 完成，每张表的生成代码减少约一半；`RegisterNew` 合并进 `GetOrAddCachedRecord`（插入前的快照就是回滚目标）；ctx 里 SQLTx 和 Transaction 合成一个值（`dbctx.HasSQLTx` 改名 `InTransaction`）；`dbpool.Transaction` 改为包内类型；锁从 5 种模式 + 接口简化成一个结构体，拿锁只发一条语句；生成器的中间结构从 `readxml` 挪回 `gen/bean`。
+- **为什么**：这些问题原来都是"约定"：嵌套事务、事务外改实体、改了再查、ctx 传错都写得出来，而且静默出错（锁自己等自己、修改丢失、查询多行漏行、副作用在提交前发出）。不去兼容这些写法，而是让它们当场失败。精简掉的都是多轮迭代留下来、已经没有调用方的 API。
+- **影响范围**：go_pg_test 用到的 API（`Procedure` / `WithTx` / `Query` / 四个锁构造器 / `dbctx.SQLTxFromCtx` / `dbctx.AfterCommit`，以及生成的查询、`SetXxx`、`Insert`）都不变，重新生成 `ptable` 即可；违反上述约束的业务代码会从静默出错变成 panic / 报错。
+- **验证状态**：`go build` / `go vet` / `PDBGEN_REQUIRE_DB=1 go test ./...`（真实 PG，不跳过）通过；新增测试覆盖每一条约束、三个超时在加锁和不加锁的事务里都生效、`statement_timeout` 能取消不加锁事务里的慢语句、`Query` 预算、日志格式化和脱敏、生成器的 schema 校验。go_pg_test 重新生成后 build / vet / test 通过，`-tags=live` 的登录 + 红包联调通过。
+- **未验证**：`-race`（本机没有 cgo）。
 
 ### 2026-10-22 生成 Delete / DeleteById
 

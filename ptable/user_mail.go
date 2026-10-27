@@ -4,11 +4,6 @@ package ptable
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"math/bits"
-	"strconv"
-	"strings"
 
 	"pdbgen/dbctx"
 )
@@ -16,6 +11,21 @@ import (
 var UserMailTable mail
 
 type mail struct{}
+
+type Mail struct {
+	id        int64
+	uid       int64
+	confId    int32
+	state     int32
+	receiveAt int64
+	params    string
+	awardList string
+
+	loaded   bool   // 对应数据库里的一行：查出来的，或者 Insert 过的
+	deleted  bool   // 标记了删除，提交前 flush 成 DELETE
+	detached bool   // 脱离了事务：SetXxx / Delete 会 panic
+	dirty    uint64 // 改过、还没落库的列，第 i 位对应 updateColumnsMail[i]
+}
 
 const (
 	dirtyMailUid       uint64 = 1 << 0
@@ -26,526 +36,246 @@ const (
 	dirtyMailAwardList uint64 = 1 << 5
 )
 
-type Mail struct {
-	id            int64
-	uid           int64
-	confId        int32
-	state         int32
-	receiveAt     int64
-	params        string
-	awardList     string
-	loaded        bool
-	deleted       bool
-	origUid       int64
-	origConfId    int32
-	origState     int32
-	origReceiveAt int64
-	origParams    string
-	origAwardList string
-	dirty         uint64
+var updateColumnsMail = []string{
+	"\"uid\"",
+	"\"conf_id\"",
+	"\"state\"",
+	"\"receive_at\"",
+	"\"params\"",
+	"\"award_list\"",
 }
 
-type mailState struct {
-	id            int64
-	uid           int64
-	confId        int32
-	state         int32
-	receiveAt     int64
-	params        string
-	awardList     string
-	loaded        bool
-	deleted       bool
-	origUid       int64
-	origConfId    int32
-	origState     int32
-	origReceiveAt int64
-	origParams    string
-	origAwardList string
-	dirty         uint64
-}
+const selectColumnsMail = "\"id\", \"uid\", \"conf_id\", \"state\", \"receive_at\", \"params\", \"award_list\""
 
 func NewMail() *Mail {
 	return &Mail{}
 }
 
-func loadedMail(
-	id int64,
-	uid int64,
-	confId int32,
-	state int32,
-	receiveAt int64,
-	params string,
-	awardList string,
-) *Mail {
-	return &Mail{
-		id:            id,
-		uid:           uid,
-		confId:        confId,
-		state:         state,
-		receiveAt:     receiveAt,
-		params:        params,
-		awardList:     awardList,
-		loaded:        true,
-		origUid:       uid,
-		origConfId:    confId,
-		origState:     state,
-		origReceiveAt: receiveAt,
-		origParams:    params,
-		origAwardList: awardList,
-	}
-}
-
 func (o *Mail) Id() int64 {
 	return o.id
-}
-func (o *Mail) SetUid(v int64) {
-	if o.uid == v {
-		return
-	}
-	o.uid = v
-	o.dirty |= dirtyMailUid
 }
 
 func (o *Mail) Uid() int64 {
 	return o.uid
 }
-func (o *Mail) SetConfId(v int32) {
-	if o.confId == v {
-		return
+
+func (o *Mail) SetUid(v int64) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.confId = v
-	o.dirty |= dirtyMailConfId
+	if o.uid != v {
+		o.uid = v
+		o.dirty |= dirtyMailUid
+	}
 }
 
 func (o *Mail) ConfId() int32 {
 	return o.confId
 }
-func (o *Mail) SetState(v int32) {
-	if o.state == v {
-		return
+
+func (o *Mail) SetConfId(v int32) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.state = v
-	o.dirty |= dirtyMailState
+	if o.confId != v {
+		o.confId = v
+		o.dirty |= dirtyMailConfId
+	}
 }
 
 func (o *Mail) State() int32 {
 	return o.state
 }
-func (o *Mail) SetReceiveAt(v int64) {
-	if o.receiveAt == v {
-		return
+
+func (o *Mail) SetState(v int32) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.receiveAt = v
-	o.dirty |= dirtyMailReceiveAt
+	if o.state != v {
+		o.state = v
+		o.dirty |= dirtyMailState
+	}
 }
 
 func (o *Mail) ReceiveAt() int64 {
 	return o.receiveAt
 }
-func (o *Mail) SetParams(v string) {
-	if o.params == v {
-		return
+
+func (o *Mail) SetReceiveAt(v int64) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.params = v
-	o.dirty |= dirtyMailParams
+	if o.receiveAt != v {
+		o.receiveAt = v
+		o.dirty |= dirtyMailReceiveAt
+	}
 }
 
 func (o *Mail) Params() string {
 	return o.params
 }
-func (o *Mail) SetAwardList(v string) {
-	if o.awardList == v {
-		return
+
+func (o *Mail) SetParams(v string) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.awardList = v
-	o.dirty |= dirtyMailAwardList
+	if o.params != v {
+		o.params = v
+		o.dirty |= dirtyMailParams
+	}
 }
 
 func (o *Mail) AwardList() string {
 	return o.awardList
 }
 
-func (o *Mail) ResetToLoaded() {
-	o.uid = o.origUid
-	o.confId = o.origConfId
-	o.state = o.origState
-	o.receiveAt = o.origReceiveAt
-	o.params = o.origParams
-	o.awardList = o.origAwardList
-	o.deleted = false
+func (o *Mail) SetAwardList(v string) {
+	if o.detached {
+		dbctx.PanicDetached(o)
+	}
+	if o.awardList != v {
+		o.awardList = v
+		o.dirty |= dirtyMailAwardList
+	}
+}
+
+// Delete 标记删除，提交前 flush 成 DELETE；同一事务里之后的查询都看不到这一行。
+func (o *Mail) Delete() {
+	if o.detached {
+		dbctx.PanicDetached(o)
+	}
+	if o.loaded {
+		o.deleted = true
+	}
+}
+
+// 以下实现 dbctx.Flusher。
+
+func (o *Mail) TableName() string { return "user_mail" }
+
+func (o *Mail) Identity() int64 { return o.id }
+
+func (o *Mail) IsDeleted() bool { return o.deleted }
+
+func (o *Mail) SnapshotState() dbctx.RecordState { return *o }
+
+func (o *Mail) RestoreState(s dbctx.RecordState) { *o = s.(Mail) }
+
+func (o *Mail) Detach() {
+	if o.loaded {
+		o.detached = true
+	}
+}
+
+func (o *Mail) DirtyColumns() uint64 {
+	if !o.loaded || o.deleted {
+		return 0
+	}
+	return o.dirty
+}
+
+func (o *Mail) FlushStmt() (string, []any) {
+	switch {
+	case !o.loaded:
+		return "", nil
+	case o.deleted:
+		return "DELETE FROM \"user_mail\" WHERE \"id\" = $1", []any{o.id}
+	case o.dirty == 0:
+		return "", nil
+	}
+	return dbctx.UpdateStmt("\"user_mail\"", "\"id\"", o.id, updateColumnsMail, o.dirty,
+		o.uid,
+		o.confId,
+		o.state,
+		o.receiveAt,
+		o.params,
+		o.awardList,
+	)
+}
+
+func (o *Mail) FlushDone() {
+	if o.deleted {
+		o.loaded, o.deleted = false, false
+	}
 	o.dirty = 0
 }
 
-// Delete 把这一行标记为待删除；实际 DELETE 在事务提交前由 flush 统一发出。
-func (v *Mail) Delete() {
-	if !v.loaded || v.deleted {
-		return
-	}
-	v.deleted = true
-}
-
-// IsDeleted 报告这一行是否在本次事务里被标记删除。
-func (v *Mail) IsDeleted() bool {
-	return v.deleted
-}
-
-func (v *Mail) SnapshotState() dbctx.RecordState {
-	return mailState{
-		id:            v.id,
-		uid:           v.uid,
-		confId:        v.confId,
-		state:         v.state,
-		receiveAt:     v.receiveAt,
-		params:        v.params,
-		awardList:     v.awardList,
-		loaded:        v.loaded,
-		deleted:       v.deleted,
-		origUid:       v.origUid,
-		origConfId:    v.origConfId,
-		origState:     v.origState,
-		origReceiveAt: v.origReceiveAt,
-		origParams:    v.origParams,
-		origAwardList: v.origAwardList,
-		dirty:         v.dirty,
-	}
-}
-
-func (v *Mail) RestoreState(state dbctx.RecordState) {
-	s := state.(mailState)
-	v.id = s.id
-	v.uid = s.uid
-	v.confId = s.confId
-	v.state = s.state
-	v.receiveAt = s.receiveAt
-	v.params = s.params
-	v.awardList = s.awardList
-	v.loaded = s.loaded
-	v.deleted = s.deleted
-	v.origUid = s.origUid
-	v.origConfId = s.origConfId
-	v.origState = s.origState
-	v.origReceiveAt = s.origReceiveAt
-	v.origParams = s.origParams
-	v.origAwardList = s.origAwardList
-	v.dirty = s.dirty
-}
-
-// ResetNew 把 Insert 回滚后的对象恢复成"未加载"状态。
-func (v *Mail) ResetNew() {
-	v.id = 0
-	v.loaded = false
-	v.deleted = false
-	v.dirty = 0
-}
-
-// TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
-// Transaction 用它们把同一行解析到同一个缓存记录
-// （xdb: getCachedTRecord / addCachedTRecord）。
-func (o *Mail) TableName() string {
-	return "user_mail"
-}
-
-// Identity 实现 dbctx.Flusher。主键自增且还没回填时返回零值，
-// 表示这个对象还没有身份。
-func (o *Mail) Identity() int64 {
-	return o.id
-}
-
-const selectColumnsMail = "\"id\", \"uid\", \"conf_id\", \"state\", \"receive_at\", \"params\", \"award_list\""
-
 func scanMail(s dbctx.Scanner) (*Mail, error) {
-	var (
-		id        int64
-		uid       int64
-		confId    int32
-		state     int32
-		receiveAt int64
-		params    string
-		awardList string
-	)
-	if err := s.Scan(
-		&id,
-		&uid,
-		&confId,
-		&state,
-		&receiveAt,
-		&params,
-		&awardList,
-	); err != nil {
+	o := &Mail{loaded: true}
+	if err := s.Scan(&o.id, &o.uid, &o.confId, &o.state, &o.receiveAt, &o.params, &o.awardList); err != nil {
 		return nil, err
 	}
-	return loadedMail(
-		id,
-		uid,
-		confId,
-		state,
-		receiveAt,
-		params,
-		awardList,
-	), nil
+	return o, nil
 }
 
-func (o mail) getId(
-	ctx context.Context,
-	q dbctx.Querier,
-	id int64,
-) *Mail {
-	const query = "SELECT " + selectColumnsMail +
-		" FROM \"user_mail\"" +
-		" WHERE \"id\" = $1"
+func (t mail) queryId(ctx context.Context, q dbctx.Querier, id int64) *Mail {
+	const query = "SELECT " + selectColumnsMail + " FROM \"user_mail\" WHERE \"id\" = $1"
 	return dbctx.QueryOne(ctx, q, query, scanMail, id)
 }
 
-func (o mail) GetById(
-	ctx context.Context,
-	id int64,
-) *Mail {
-	if v, ok := dbctx.GetCachedRecordAs[*Mail](ctx, "user_mail", id); ok {
-		if v.IsDeleted() {
-			return nil
-		}
-		return v
+func (t mail) GetById(ctx context.Context, id int64) *Mail {
+	if o, ok := dbctx.GetCachedRecordAs[*Mail](ctx, "user_mail", id); ok {
+		return o
 	}
-	return o.getId(
-		ctx,
-		dbctx.SQLTxFromCtx(ctx),
-		id,
-	)
+	return t.queryId(ctx, dbctx.SQLTxFromCtx(ctx), id)
 }
 
-func (o mail) SelectById(
-	ctx context.Context,
-	id int64,
-) *Mail {
-	return o.getId(
-		ctx,
-		dbctx.QuerierFromCtx(ctx),
-		id,
-	)
+func (t mail) SelectById(ctx context.Context, id int64) *Mail {
+	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx), id)
 }
 
-func (o mail) listUidConfId(
-	ctx context.Context,
-	q dbctx.Querier,
-	uid int64, confId int32,
-) []*Mail {
-	const query = "SELECT " + selectColumnsMail +
-		" FROM \"user_mail\"" +
-		" WHERE \"uid\" = $1 AND \"conf_id\" = $2"
+func (t mail) queryUidConfId(ctx context.Context, q dbctx.Querier, uid int64, confId int32) []*Mail {
+	dbctx.CheckPredicate(ctx, "user_mail", dirtyMailUid|dirtyMailConfId)
+	const query = "SELECT " + selectColumnsMail + " FROM \"user_mail\" WHERE \"uid\" = $1 AND \"conf_id\" = $2"
 	return dbctx.QueryList(ctx, q, query, scanMail, uid, confId)
 }
 
-func (o mail) ListByUidConfId(
-	ctx context.Context,
-	uid int64, confId int32,
-) []*Mail {
-	return o.listUidConfId(
-		ctx,
-		dbctx.SQLTxFromCtx(ctx),
-		uid, confId,
-	)
+func (t mail) ListByUidConfId(ctx context.Context, uid int64, confId int32) []*Mail {
+	return t.queryUidConfId(ctx, dbctx.SQLTxFromCtx(ctx), uid, confId)
 }
 
-func (o mail) SelectListByUidConfId(
-	ctx context.Context,
-	uid int64, confId int32,
-) []*Mail {
-	return o.listUidConfId(
-		ctx,
-		dbctx.QuerierFromCtx(ctx),
-		uid, confId,
-	)
+func (t mail) SelectListByUidConfId(ctx context.Context, uid int64, confId int32) []*Mail {
+	return t.queryUidConfId(ctx, dbctx.QuerierFromCtx(ctx), uid, confId)
 }
 
-// DeleteById 在事务里按主键标记删除；找不到返回 false。
-// 实际 DELETE 在事务提交前由 flush 统一发出，失败时由 memento 恢复。
-func (o mail) DeleteById(
-	ctx context.Context,
-	id int64,
-) bool {
-	v := o.GetById(ctx, id)
-	if v == nil {
+// DeleteById 按主键标记删除，提交前 flush 成 DELETE；找不到返回 false。
+func (t mail) DeleteById(ctx context.Context, id int64) bool {
+	o := t.GetById(ctx, id)
+	if o == nil {
 		return false
 	}
-	v.Delete()
+	o.Delete()
 	return true
 }
 
-func (o mail) getAll(
-	ctx context.Context,
-	q dbctx.Querier,
-) []*Mail {
-	const query = "SELECT " + selectColumnsMail +
-		" FROM \"user_mail\""
-	return dbctx.QueryList(ctx, q, query, scanMail)
+const selectAllMail = "SELECT " + selectColumnsMail + " FROM \"user_mail\""
+
+func (t mail) GetAll(ctx context.Context) []*Mail {
+	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx), selectAllMail, scanMail)
 }
 
-func (o mail) GetAll(
-	ctx context.Context,
-) []*Mail {
-	return o.getAll(ctx, dbctx.SQLTxFromCtx(ctx))
+func (t mail) SelectAll(ctx context.Context) []*Mail {
+	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx), selectAllMail, scanMail)
 }
 
-func (o mail) SelectAll(
-	ctx context.Context,
-) []*Mail {
-	return o.getAll(ctx, dbctx.QuerierFromCtx(ctx))
-}
-
-var ErrMailNotFound = errors.New(
-	"user_mail: row not found at update time",
-)
-
-// FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
-// deleted 时返回 DELETE；Transaction 据此跳过没有变化的行。
-func (v *Mail) FlushStmt() (string, []any) {
-	if !v.loaded {
-		return "", nil
+// Insert 插入一个 NewMail() 创建的新对象，主键由数据库生成并回填。
+func (t mail) Insert(ctx context.Context, o *Mail) {
+	if o.loaded {
+		panic("pdbgen: user_mail: Insert 只接受 NewMail() 创建、还没插入过的对象")
 	}
-	if v.deleted {
-		return "DELETE FROM \"user_mail\" WHERE \"id\" = $1", []any{v.id}
-	}
-	if v.dirty == 0 {
-		return "", nil
-	}
-	var sb strings.Builder
-	args := make([]any, 0, bits.OnesCount64(v.dirty)+1)
-	sb.WriteString("UPDATE \"user_mail\" SET ")
-	if v.dirty&dirtyMailUid != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.uid)
-		sb.WriteString("\"uid\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyMailConfId != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.confId)
-		sb.WriteString("\"conf_id\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyMailState != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.state)
-		sb.WriteString("\"state\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyMailReceiveAt != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.receiveAt)
-		sb.WriteString("\"receive_at\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyMailParams != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.params)
-		sb.WriteString("\"params\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyMailAwardList != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.awardList)
-		sb.WriteString("\"award_list\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	args = append(args, v.id)
-	sb.WriteString(" WHERE \"id\" = $")
-	sb.WriteString(strconv.Itoa(len(args)))
-	return sb.String(), args
-}
-
-// FlushDone 实现 dbctx.Flusher，在对应 UPDATE/DELETE 执行成功后回调。
-// UPDATE 同步 orig 快照并清空 dirty；DELETE 把对象置为未加载。
-// rows == 0 说明这一行已经不存在。
-func (v *Mail) FlushDone(rows int64) error {
-	if rows == 0 {
-		return ErrMailNotFound
-	}
-	if v.deleted {
-		v.dirty = 0
-		v.loaded = false
-		v.deleted = false
-		return nil
-	}
-	v.origUid = v.uid
-	v.origConfId = v.confId
-	v.origState = v.state
-	v.origReceiveAt = v.receiveAt
-	v.origParams = v.params
-	v.origAwardList = v.awardList
-	v.dirty = 0
-	return nil
-}
-
-// Update 是不经过 Transaction 的直接落库入口，
-// 生成代码内部不再调用它，仅供业务代码需要立即写库时使用。
-func (o mail) Update(
-	ctx context.Context,
-	v *Mail,
-) error {
-	query, args := v.FlushStmt()
-	if query == "" {
-		return nil
-	}
-	tag, err := dbctx.SQLTxFromCtx(ctx).Exec(ctx, query, args...)
-	if err != nil {
-		return fmt.Errorf("user_mail update: %w", err)
-	}
-	return v.FlushDone(tag.RowsAffected())
-}
-
-func (o mail) Insert(
-	ctx context.Context,
-	v *Mail,
-) {
-	dbctx.RegisterNew(ctx, v)
 	tx := dbctx.SQLTxFromCtx(ctx)
-	const query = "INSERT INTO \"user_mail\" " +
-		"(\"uid\", \"conf_id\", \"state\", \"receive_at\", \"params\", \"award_list\") " +
-		"VALUES ($1, $2, $3, $4, $5, $6)" +
-		" RETURNING \"id\""
-
-	row := tx.QueryRow(
-		ctx,
-		query,
-		v.uid,
-		v.confId,
-		v.state,
-		v.receiveAt,
-		v.params,
-		v.awardList,
-	)
-	if err := row.Scan(
-		&v.id,
-	); err != nil {
+	dbctx.GetOrAddCachedRecord(ctx, o) // 主键还是 0：只登记快照，回滚时恢复成插入前的样子
+	const query = "INSERT INTO \"user_mail\" (\"uid\", \"conf_id\", \"state\", \"receive_at\", \"params\", \"award_list\") VALUES ($1, $2, $3, $4, $5, $6) RETURNING \"id\""
+	if err := tx.QueryRow(ctx, query,
+		o.uid,
+		o.confId,
+		o.state,
+		o.receiveAt,
+		o.params,
+		o.awardList,
+	).Scan(&o.id); err != nil {
 		panic(err)
 	}
-
-	v.loaded = true
-
-	v.origUid = v.uid
-
-	v.origConfId = v.confId
-
-	v.origState = v.state
-
-	v.origReceiveAt = v.receiveAt
-
-	v.origParams = v.params
-
-	v.origAwardList = v.awardList
-
-	v.dirty = 0
-	dbctx.GetOrAddCachedRecord(ctx, v)
+	o.loaded, o.dirty = true, 0
+	dbctx.GetOrAddCachedRecord(ctx, o) // 主键回填后进身份表
 }

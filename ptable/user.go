@@ -4,11 +4,6 @@ package ptable
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"math/bits"
-	"strconv"
-	"strings"
 
 	"pdbgen/dbctx"
 )
@@ -17,6 +12,19 @@ var UserTable user
 
 type user struct{}
 
+type User struct {
+	id          int64
+	name        string
+	lastLoginAt int64
+	createdAt   int64
+	token       string
+
+	loaded   bool   // 对应数据库里的一行：查出来的，或者 Insert 过的
+	deleted  bool   // 标记了删除，提交前 flush 成 DELETE
+	detached bool   // 脱离了事务：SetXxx / Delete 会 panic
+	dirty    uint64 // 改过、还没落库的列，第 i 位对应 updateColumnsUser[i]
+}
+
 const (
 	dirtyUserName        uint64 = 1 << 0
 	dirtyUserLastLoginAt uint64 = 1 << 1
@@ -24,417 +32,198 @@ const (
 	dirtyUserToken       uint64 = 1 << 3
 )
 
-type User struct {
-	id              int64
-	name            string
-	lastLoginAt     int64
-	createdAt       int64
-	token           string
-	loaded          bool
-	deleted         bool
-	origName        string
-	origLastLoginAt int64
-	origCreatedAt   int64
-	origToken       string
-	dirty           uint64
+var updateColumnsUser = []string{
+	"\"name\"",
+	"\"last_login_at\"",
+	"\"created_at\"",
+	"\"token\"",
 }
 
-type userState struct {
-	id              int64
-	name            string
-	lastLoginAt     int64
-	createdAt       int64
-	token           string
-	loaded          bool
-	deleted         bool
-	origName        string
-	origLastLoginAt int64
-	origCreatedAt   int64
-	origToken       string
-	dirty           uint64
-}
+const selectColumnsUser = "\"id\", \"name\", \"last_login_at\", \"created_at\", \"token\""
 
 func NewUser() *User {
 	return &User{}
 }
 
-func loadedUser(
-	id int64,
-	name string,
-	lastLoginAt int64,
-	createdAt int64,
-	token string,
-) *User {
-	return &User{
-		id:              id,
-		name:            name,
-		lastLoginAt:     lastLoginAt,
-		createdAt:       createdAt,
-		token:           token,
-		loaded:          true,
-		origName:        name,
-		origLastLoginAt: lastLoginAt,
-		origCreatedAt:   createdAt,
-		origToken:       token,
-	}
-}
-
 func (o *User) Id() int64 {
 	return o.id
-}
-func (o *User) SetName(v string) {
-	if o.name == v {
-		return
-	}
-	o.name = v
-	o.dirty |= dirtyUserName
 }
 
 func (o *User) Name() string {
 	return o.name
 }
-func (o *User) SetLastLoginAt(v int64) {
-	if o.lastLoginAt == v {
-		return
+
+func (o *User) SetName(v string) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.lastLoginAt = v
-	o.dirty |= dirtyUserLastLoginAt
+	if o.name != v {
+		o.name = v
+		o.dirty |= dirtyUserName
+	}
 }
 
 func (o *User) LastLoginAt() int64 {
 	return o.lastLoginAt
 }
-func (o *User) SetCreatedAt(v int64) {
-	if o.createdAt == v {
-		return
+
+func (o *User) SetLastLoginAt(v int64) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.createdAt = v
-	o.dirty |= dirtyUserCreatedAt
+	if o.lastLoginAt != v {
+		o.lastLoginAt = v
+		o.dirty |= dirtyUserLastLoginAt
+	}
 }
 
 func (o *User) CreatedAt() int64 {
 	return o.createdAt
 }
-func (o *User) SetToken(v string) {
-	if o.token == v {
-		return
+
+func (o *User) SetCreatedAt(v int64) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.token = v
-	o.dirty |= dirtyUserToken
+	if o.createdAt != v {
+		o.createdAt = v
+		o.dirty |= dirtyUserCreatedAt
+	}
 }
 
 func (o *User) Token() string {
 	return o.token
 }
 
-func (o *User) ResetToLoaded() {
-	o.name = o.origName
-	o.lastLoginAt = o.origLastLoginAt
-	o.createdAt = o.origCreatedAt
-	o.token = o.origToken
-	o.deleted = false
+func (o *User) SetToken(v string) {
+	if o.detached {
+		dbctx.PanicDetached(o)
+	}
+	if o.token != v {
+		o.token = v
+		o.dirty |= dirtyUserToken
+	}
+}
+
+// Delete 标记删除，提交前 flush 成 DELETE；同一事务里之后的查询都看不到这一行。
+func (o *User) Delete() {
+	if o.detached {
+		dbctx.PanicDetached(o)
+	}
+	if o.loaded {
+		o.deleted = true
+	}
+}
+
+// 以下实现 dbctx.Flusher。
+
+func (o *User) TableName() string { return "user" }
+
+func (o *User) Identity() int64 { return o.id }
+
+func (o *User) IsDeleted() bool { return o.deleted }
+
+func (o *User) SnapshotState() dbctx.RecordState { return *o }
+
+func (o *User) RestoreState(s dbctx.RecordState) { *o = s.(User) }
+
+func (o *User) Detach() {
+	if o.loaded {
+		o.detached = true
+	}
+}
+
+func (o *User) DirtyColumns() uint64 {
+	if !o.loaded || o.deleted {
+		return 0
+	}
+	return o.dirty
+}
+
+func (o *User) FlushStmt() (string, []any) {
+	switch {
+	case !o.loaded:
+		return "", nil
+	case o.deleted:
+		return "DELETE FROM \"user\" WHERE \"id\" = $1", []any{o.id}
+	case o.dirty == 0:
+		return "", nil
+	}
+	return dbctx.UpdateStmt("\"user\"", "\"id\"", o.id, updateColumnsUser, o.dirty,
+		o.name,
+		o.lastLoginAt,
+		o.createdAt,
+		dbctx.Secret(o.token),
+	)
+}
+
+func (o *User) FlushDone() {
+	if o.deleted {
+		o.loaded, o.deleted = false, false
+	}
 	o.dirty = 0
 }
 
-// Delete 把这一行标记为待删除；实际 DELETE 在事务提交前由 flush 统一发出。
-func (v *User) Delete() {
-	if !v.loaded || v.deleted {
-		return
-	}
-	v.deleted = true
-}
-
-// IsDeleted 报告这一行是否在本次事务里被标记删除。
-func (v *User) IsDeleted() bool {
-	return v.deleted
-}
-
-func (v *User) SnapshotState() dbctx.RecordState {
-	return userState{
-		id:              v.id,
-		name:            v.name,
-		lastLoginAt:     v.lastLoginAt,
-		createdAt:       v.createdAt,
-		token:           v.token,
-		loaded:          v.loaded,
-		deleted:         v.deleted,
-		origName:        v.origName,
-		origLastLoginAt: v.origLastLoginAt,
-		origCreatedAt:   v.origCreatedAt,
-		origToken:       v.origToken,
-		dirty:           v.dirty,
-	}
-}
-
-func (v *User) RestoreState(state dbctx.RecordState) {
-	s := state.(userState)
-	v.id = s.id
-	v.name = s.name
-	v.lastLoginAt = s.lastLoginAt
-	v.createdAt = s.createdAt
-	v.token = s.token
-	v.loaded = s.loaded
-	v.deleted = s.deleted
-	v.origName = s.origName
-	v.origLastLoginAt = s.origLastLoginAt
-	v.origCreatedAt = s.origCreatedAt
-	v.origToken = s.origToken
-	v.dirty = s.dirty
-}
-
-// ResetNew 把 Insert 回滚后的对象恢复成"未加载"状态。
-func (v *User) ResetNew() {
-	v.id = 0
-	v.loaded = false
-	v.deleted = false
-	v.dirty = 0
-}
-
-// TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
-// Transaction 用它们把同一行解析到同一个缓存记录
-// （xdb: getCachedTRecord / addCachedTRecord）。
-func (o *User) TableName() string {
-	return "user"
-}
-
-// Identity 实现 dbctx.Flusher。主键自增且还没回填时返回零值，
-// 表示这个对象还没有身份。
-func (o *User) Identity() int64 {
-	return o.id
-}
-
-const selectColumnsUser = "\"id\", \"name\", \"last_login_at\", \"created_at\", \"token\""
-
 func scanUser(s dbctx.Scanner) (*User, error) {
-	var (
-		id          int64
-		name        string
-		lastLoginAt int64
-		createdAt   int64
-		token       string
-	)
-	if err := s.Scan(
-		&id,
-		&name,
-		&lastLoginAt,
-		&createdAt,
-		&token,
-	); err != nil {
+	o := &User{loaded: true}
+	if err := s.Scan(&o.id, &o.name, &o.lastLoginAt, &o.createdAt, &o.token); err != nil {
 		return nil, err
 	}
-	return loadedUser(
-		id,
-		name,
-		lastLoginAt,
-		createdAt,
-		token,
-	), nil
+	return o, nil
 }
 
-func (o user) getId(
-	ctx context.Context,
-	q dbctx.Querier,
-	id int64,
-) *User {
-	const query = "SELECT " + selectColumnsUser +
-		" FROM \"user\"" +
-		" WHERE \"id\" = $1"
+func (t user) queryId(ctx context.Context, q dbctx.Querier, id int64) *User {
+	const query = "SELECT " + selectColumnsUser + " FROM \"user\" WHERE \"id\" = $1"
 	return dbctx.QueryOne(ctx, q, query, scanUser, id)
 }
 
-func (o user) GetById(
-	ctx context.Context,
-	id int64,
-) *User {
-	if v, ok := dbctx.GetCachedRecordAs[*User](ctx, "user", id); ok {
-		if v.IsDeleted() {
-			return nil
-		}
-		return v
+func (t user) GetById(ctx context.Context, id int64) *User {
+	if o, ok := dbctx.GetCachedRecordAs[*User](ctx, "user", id); ok {
+		return o
 	}
-	return o.getId(
-		ctx,
-		dbctx.SQLTxFromCtx(ctx),
-		id,
-	)
+	return t.queryId(ctx, dbctx.SQLTxFromCtx(ctx), id)
 }
 
-func (o user) SelectById(
-	ctx context.Context,
-	id int64,
-) *User {
-	return o.getId(
-		ctx,
-		dbctx.QuerierFromCtx(ctx),
-		id,
-	)
+func (t user) SelectById(ctx context.Context, id int64) *User {
+	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx), id)
 }
 
-// DeleteById 在事务里按主键标记删除；找不到返回 false。
-// 实际 DELETE 在事务提交前由 flush 统一发出，失败时由 memento 恢复。
-func (o user) DeleteById(
-	ctx context.Context,
-	id int64,
-) bool {
-	v := o.GetById(ctx, id)
-	if v == nil {
+// DeleteById 按主键标记删除，提交前 flush 成 DELETE；找不到返回 false。
+func (t user) DeleteById(ctx context.Context, id int64) bool {
+	o := t.GetById(ctx, id)
+	if o == nil {
 		return false
 	}
-	v.Delete()
+	o.Delete()
 	return true
 }
 
-func (o user) getAll(
-	ctx context.Context,
-	q dbctx.Querier,
-) []*User {
-	const query = "SELECT " + selectColumnsUser +
-		" FROM \"user\""
-	return dbctx.QueryList(ctx, q, query, scanUser)
+const selectAllUser = "SELECT " + selectColumnsUser + " FROM \"user\""
+
+func (t user) GetAll(ctx context.Context) []*User {
+	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx), selectAllUser, scanUser)
 }
 
-func (o user) GetAll(
-	ctx context.Context,
-) []*User {
-	return o.getAll(ctx, dbctx.SQLTxFromCtx(ctx))
+func (t user) SelectAll(ctx context.Context) []*User {
+	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx), selectAllUser, scanUser)
 }
 
-func (o user) SelectAll(
-	ctx context.Context,
-) []*User {
-	return o.getAll(ctx, dbctx.QuerierFromCtx(ctx))
-}
-
-var ErrUserNotFound = errors.New(
-	"user: row not found at update time",
-)
-
-// FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
-// deleted 时返回 DELETE；Transaction 据此跳过没有变化的行。
-func (v *User) FlushStmt() (string, []any) {
-	if !v.loaded {
-		return "", nil
+// Insert 插入一个 NewUser() 创建的新对象，主键由数据库生成并回填。
+func (t user) Insert(ctx context.Context, o *User) {
+	if o.loaded {
+		panic("pdbgen: user: Insert 只接受 NewUser() 创建、还没插入过的对象")
 	}
-	if v.deleted {
-		return "DELETE FROM \"user\" WHERE \"id\" = $1", []any{v.id}
-	}
-	if v.dirty == 0 {
-		return "", nil
-	}
-	var sb strings.Builder
-	args := make([]any, 0, bits.OnesCount64(v.dirty)+1)
-	sb.WriteString("UPDATE \"user\" SET ")
-	if v.dirty&dirtyUserName != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.name)
-		sb.WriteString("\"name\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyUserLastLoginAt != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.lastLoginAt)
-		sb.WriteString("\"last_login_at\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyUserCreatedAt != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.createdAt)
-		sb.WriteString("\"created_at\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyUserToken != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.token)
-		sb.WriteString("\"token\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	args = append(args, v.id)
-	sb.WriteString(" WHERE \"id\" = $")
-	sb.WriteString(strconv.Itoa(len(args)))
-	return sb.String(), args
-}
-
-// FlushDone 实现 dbctx.Flusher，在对应 UPDATE/DELETE 执行成功后回调。
-// UPDATE 同步 orig 快照并清空 dirty；DELETE 把对象置为未加载。
-// rows == 0 说明这一行已经不存在。
-func (v *User) FlushDone(rows int64) error {
-	if rows == 0 {
-		return ErrUserNotFound
-	}
-	if v.deleted {
-		v.dirty = 0
-		v.loaded = false
-		v.deleted = false
-		return nil
-	}
-	v.origName = v.name
-	v.origLastLoginAt = v.lastLoginAt
-	v.origCreatedAt = v.createdAt
-	v.origToken = v.token
-	v.dirty = 0
-	return nil
-}
-
-// Update 是不经过 Transaction 的直接落库入口，
-// 生成代码内部不再调用它，仅供业务代码需要立即写库时使用。
-func (o user) Update(
-	ctx context.Context,
-	v *User,
-) error {
-	query, args := v.FlushStmt()
-	if query == "" {
-		return nil
-	}
-	tag, err := dbctx.SQLTxFromCtx(ctx).Exec(ctx, query, args...)
-	if err != nil {
-		return fmt.Errorf("user update: %w", err)
-	}
-	return v.FlushDone(tag.RowsAffected())
-}
-
-func (o user) Insert(
-	ctx context.Context,
-	v *User,
-) {
-	dbctx.RegisterNew(ctx, v)
 	tx := dbctx.SQLTxFromCtx(ctx)
-	const query = "INSERT INTO \"user\" " +
-		"(\"name\", \"last_login_at\", \"created_at\", \"token\") " +
-		"VALUES ($1, $2, $3, $4)" +
-		" RETURNING \"id\""
-
-	row := tx.QueryRow(
-		ctx,
-		query,
-		v.name,
-		v.lastLoginAt,
-		v.createdAt,
-		v.token,
-	)
-	if err := row.Scan(
-		&v.id,
-	); err != nil {
+	dbctx.GetOrAddCachedRecord(ctx, o) // 主键还是 0：只登记快照，回滚时恢复成插入前的样子
+	const query = "INSERT INTO \"user\" (\"name\", \"last_login_at\", \"created_at\", \"token\") VALUES ($1, $2, $3, $4) RETURNING \"id\""
+	if err := tx.QueryRow(ctx, query,
+		o.name,
+		o.lastLoginAt,
+		o.createdAt,
+		dbctx.Secret(o.token),
+	).Scan(&o.id); err != nil {
 		panic(err)
 	}
-
-	v.loaded = true
-
-	v.origName = v.name
-
-	v.origLastLoginAt = v.lastLoginAt
-
-	v.origCreatedAt = v.createdAt
-
-	v.origToken = v.token
-
-	v.dirty = 0
-	dbctx.GetOrAddCachedRecord(ctx, v)
+	o.loaded, o.dirty = true, 0
+	dbctx.GetOrAddCachedRecord(ctx, o) // 主键回填后进身份表
 }

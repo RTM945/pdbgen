@@ -25,7 +25,7 @@ type Schema struct {
 	IdleInTransactionSessionTimeoutMs int `xml:"idleInTransactionSessionTimeoutMs,attr"`
 	LockTimeoutMs                     int `xml:"lockTimeoutMs,attr"`
 
-	// TransactionTimeoutMs 一个事务（BEGIN 到 COMMIT）的总时长上限。
+	// TransactionTimeoutMs 一次 Procedure（BEGIN 到 COMMIT）或 dbpool.Query 回调的客户端总时长上限。
 	// statement_timeout 只管单条语句，管不住"很多条语句加起来很慢"；
 	// PG 17 之前也没有事务级的 GUC，所以只能在客户端这边包一层。
 	TransactionTimeoutMs int `xml:"transactionTimeoutMs,attr"`
@@ -46,6 +46,9 @@ type Bean struct {
 type Variable struct {
 	Name string `xml:"name,attr"`
 	Type string `xml:"type,attr"`
+
+	// Sensitive 标记敏感列（token、密码哈希等）：SQL 日志里它的参数只打成 '***'。
+	Sensitive bool `xml:"sensitive,attr"`
 }
 
 type Table struct {
@@ -65,48 +68,6 @@ type PrimaryKey struct {
 type Index struct {
 	Variable string `xml:"variable,attr"`
 	Unique   bool   `xml:"unique,attr"`
-}
-
-type Field struct {
-	Name          string
-	MethodName    string
-	Column        string
-	GoType        string
-	IsPrimaryKey  bool
-	AutoIncrement bool
-}
-
-type QueryMethod struct {
-	Name         string
-	Params       string
-	Args         string
-	Where        string
-	IsList       bool
-	IsPrimaryKey bool
-}
-
-type TableGen struct {
-	TypeName      string
-	ReceiverName  string
-	TableAccessor string
-	TableName     string
-
-	Fields       []Field
-	UpdateFields []Field
-	InsertFields []Field
-
-	PK            Field
-	AutoIncrement bool
-
-	SelectColumns string
-	ErrorName     string
-
-	QueryMethods []QueryMethod
-}
-
-type TableFileGen struct {
-	Package string
-	TableGen
 }
 
 var (
@@ -181,29 +142,6 @@ func FindBean(schema *Schema, name string) (*Bean, error) {
 	}
 
 	return nil, fmt.Errorf("bean %q not found", name)
-}
-
-func JoinFieldColumns(fields []Field) string {
-	cols := make([]string, 0, len(fields))
-
-	for _, f := range fields {
-		cols = append(cols, f.Column)
-	}
-
-	return strings.Join(cols, ", ")
-}
-
-func Placeholders(fields []Field) string {
-	result := make([]string, 0, len(fields))
-
-	for i := range fields {
-		result = append(
-			result,
-			fmt.Sprintf("$%d", i+1),
-		)
-	}
-
-	return strings.Join(result, ", ")
 }
 
 func LoadSchema(filename string) (*Schema, error) {

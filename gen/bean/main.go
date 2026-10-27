@@ -5,269 +5,305 @@ import (
 	"flag"
 	"fmt"
 	"go/format"
+	"go/token"
 	"os"
 	"path/filepath"
-	"pdbgen/readxml"
 	"strconv"
 	"strings"
 	"text/template"
+
+	"pdbgen/readxml"
 )
 
 func main() {
-	schemaFile := flag.String(
-		"schema",
-		"./pdb.xml",
-		"schema xml file",
-	)
-
+	schemaFile := flag.String("schema", "./pdb.xml", "schema xml file")
 	flag.Parse()
 
-	schema, err := readxml.LoadSchema(*schemaFile)
-	if err != nil {
-		panic(err)
+	if err := run(*schemaFile); err != nil {
+		fmt.Fprintln(os.Stderr, "genbeans:", err)
+		os.Exit(1)
 	}
+}
 
+func run(schemaFile string) error {
+	schema, err := readxml.LoadSchema(schemaFile)
+	if err != nil {
+		return err
+	}
+	if err := checkTables(schema); err != nil {
+		return err
+	}
 	for _, table := range schema.Tables {
 		data, err := generateTable(schema, table)
 		if err != nil {
-			panic(err)
+			return err
 		}
-
-		filename := table.Name + ".go"
-		output := filepath.Join(schema.GenOutput, filename)
-
+		output := filepath.Join(schema.GenOutput, table.Name+".go")
 		if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
-			panic(err)
+			return err
 		}
-
 		if err := os.WriteFile(output, data, 0o644); err != nil {
-			panic(err)
+			return err
 		}
-
 		fmt.Printf("generated %s\n", output)
 	}
+	return nil
 }
+
+// field 是 bean 里的一列。
+type field struct {
+	Name         string // Go 字段名，也是查询方法的参数名
+	MethodName   string
+	Column       string // 已加引号、已转义成 Go 字符串内容的列名：\"act_id\"
+	GoType       string
+	IsPrimaryKey bool
+	Sensitive    bool
+}
+
+// queryMethod 是按主键或索引生成的一组查询方法。
+type queryMethod struct {
+	Name         string // GetBy<Name> / ListBy<Name>
+	Params       string // uid int64, actId int32
+	Args         string // uid, actId
+	SQLArgs      string // 传给 SQL 的参数，sensitive 列包成 dbctx.Secret
+	Where        string
+	Columns      string // 条件里可更新列的 dirty 位，给 CheckPredicate；只有主键时为空
+	IsList       bool
+	IsPrimaryKey bool
+}
+
+type tableGen struct {
+	Package       string
+	TypeName      string
+	ReceiverName  string
+	TableAccessor string
+	TableName     string
+
+	Fields       []field
+	UpdateFields []field // 除主键外的列，与 dirty 位一一对应
+	PK           field
+
+	SelectColumns string
+	InsertColumns string
+	InsertValues  string
+
+	QueryMethods []queryMethod
+}
+
+var tpl = template.Must(template.New("table").Funcs(template.FuncMap{
+	"quote":  quoteIdent,
+	"sqlArg": sqlArg,
+}).Parse(sourceTemplate))
 
 func generateTable(schema *readxml.Schema, table readxml.Table) ([]byte, error) {
 	gen, err := buildTableGen(schema, table)
 	if err != nil {
 		return nil, err
 	}
-
-	data := readxml.TableFileGen{
-		Package:  schema.Package,
-		TableGen: gen,
-	}
-
-	tpl, err := template.New("generated").
-		Funcs(template.FuncMap{
-			"add": func(a, b int) int {
-				return a + b
-			},
-			"quote": quoteIdent,
-		}).
-		Parse(sourceTemplate)
-	if err != nil {
-		return nil, err
-	}
-
 	var buf bytes.Buffer
-
-	if err := tpl.Execute(&buf, data); err != nil {
+	if err := tpl.Execute(&buf, gen); err != nil {
 		return nil, err
 	}
-
 	formatted, err := format.Source(buf.Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("gofmt generated source for table %q: %w", table.Name, err)
 	}
-
 	return formatted, nil
 }
 
 // quoteIdent 返回嵌入 Go 字符串字面量后的 SQL 标识符：user -> \"user\"。
-// 模板里这几处都在 "..." 内部，所以 SQL 的双引号必须再转义一层。
-// 表名可能是 user 这种保留字，不引用的话生成的 DML 直接语法错误（DDL 侧本来就引用了）。
+// 表名、列名一律加引号：user、end、order 这类保留字不加引号会直接语法错误。
 func quoteIdent(s string) string {
 	q := strconv.Quote(`"` + strings.ReplaceAll(s, `"`, `""`) + `"`)
 	return q[1 : len(q)-1]
 }
 
-func buildTableGen(schema *readxml.Schema, table readxml.Table) (readxml.TableGen, error) {
-	gen := readxml.TableGen{}
+// sqlArg 返回把字段值作为 SQL 参数传出去的表达式，sensitive 列包成 dbctx.Secret。
+func sqlArg(f field, prefix string) string {
+	if f.Sensitive {
+		return "dbctx.Secret(" + prefix + f.Name + ")"
+	}
+	return prefix + f.Name
+}
+
+// supportedTypes 与 gen/ddl 的类型映射一致。
+var supportedTypes = map[string]bool{
+	"int64": true, "int32": true, "int16": true, "int8": true,
+	"string": true, "bool": true, "float32": true, "float64": true,
+}
+
+// reservedNames 是生成代码自己用的名字：实体的内部字段，查询方法的接收者、参数和局部变量。
+var reservedNames = map[string]bool{
+	"loaded": true, "deleted": true, "detached": true, "dirty": true,
+	"t": true, "o": true, "q": true, "ctx": true, "query": true,
+}
+
+// reservedMethods 是实体上已有的方法，列的 getter 不能和它们同名。
+var reservedMethods = map[string]bool{
+	"TableName": true, "Identity": true, "IsDeleted": true, "Delete": true, "Detach": true,
+	"DirtyColumns": true, "FlushStmt": true, "FlushDone": true, "SnapshotState": true, "RestoreState": true,
+}
+
+func checkVariable(table string, v readxml.Variable) error {
+	switch {
+	case token.IsKeyword(v.Name):
+		return fmt.Errorf("table %q: 列名 %q 是 Go 关键字，换个名字（比如 typ、kind）", table, v.Name)
+	case !token.IsIdentifier(v.Name) || v.Name[0] < 'a' || v.Name[0] > 'z':
+		return fmt.Errorf("table %q: 列名 %q 必须是小写字母开头的 Go 标识符", table, v.Name)
+	case reservedNames[v.Name] || reservedMethods[readxml.PascalCase(v.Name)]:
+		return fmt.Errorf("table %q: 列名 %q 和生成代码的内部名字冲突，换个名字", table, v.Name)
+	case !supportedTypes[v.Type]:
+		return fmt.Errorf("table %q: 列 %q 的类型 %q 不支持", table, v.Name, v.Type)
+	case v.Sensitive && v.Type != "string":
+		return fmt.Errorf("table %q: 列 %q 不是 string，不能标记 sensitive", table, v.Name)
+	}
+	return nil
+}
+
+// checkTables 检查跨表的约束：一个 bean 只能映射一张表——生成的类型和表一一对应，
+// 身份表按表名区分记录；表名、类型名都不能重复。
+func checkTables(schema *readxml.Schema) error {
+	tables := make(map[string]bool)
+	types := make(map[string]string)
+	for _, t := range schema.Tables {
+		if tables[t.Name] {
+			return fmt.Errorf("table %q 重复定义", t.Name)
+		}
+		tables[t.Name] = true
+		typeName := readxml.PascalCase(t.Bean)
+		if other, ok := types[typeName]; ok {
+			return fmt.Errorf("table %q 和 %q 生成同一个类型 %s：一个 bean 只能映射一张表", t.Name, other, typeName)
+		}
+		types[typeName] = t.Name
+	}
+	return nil
+}
+
+func buildTableGen(schema *readxml.Schema, table readxml.Table) (tableGen, error) {
+	gen := tableGen{Package: schema.Package, TableName: table.Name}
 	bean, err := readxml.FindBean(schema, table.Bean)
 	if err != nil {
 		return gen, err
 	}
-
-	if table.PrimaryKey == nil {
+	pk := table.PrimaryKey
+	if pk == nil {
 		return gen, fmt.Errorf("table %q has no primary key", table.Name)
 	}
 	gen.TypeName = readxml.PascalCase(bean.Name)
 	gen.ReceiverName = readxml.LowerCamelCase(bean.Name)
 	gen.TableAccessor = readxml.PascalCase(table.Name) + "Table"
-	gen.TableName = table.Name
-	gen.ErrorName = "Err" + readxml.PascalCase(bean.Name) + "NotFound"
 
-	fieldMap := make(map[string]readxml.Field, len(bean.Variables))
-
-	for _, variable := range bean.Variables {
-		if variable.Name == "" {
-			return gen, fmt.Errorf("table %q has variable with empty name", table.Name)
+	fields := make(map[string]field, len(bean.Variables))
+	for _, v := range bean.Variables {
+		if err := checkVariable(table.Name, v); err != nil {
+			return gen, err
 		}
-
-		if variable.Type == "" {
-			return gen, fmt.Errorf("table %q variable %q has empty type", table.Name, variable.Name)
+		if _, ok := fields[v.Name]; ok {
+			return gen, fmt.Errorf("table %q: 列 %q 重复", table.Name, v.Name)
 		}
-
-		if _, exists := fieldMap[variable.Name]; exists {
-			return gen, fmt.Errorf("table %q duplicate variable %q", table.Name, variable.Name)
+		f := field{
+			Name:         v.Name,
+			MethodName:   readxml.PascalCase(v.Name),
+			Column:       quoteIdent(readxml.SnakeCase(v.Name)),
+			GoType:       v.Type,
+			IsPrimaryKey: v.Name == pk.Variable,
+			Sensitive:    v.Sensitive,
 		}
-
-		field := readxml.Field{
-			Name:       variable.Name,
-			MethodName: readxml.PascalCase(variable.Name),
-			// 列名一律加引号：end / order 这类是 SQL 保留字，
-			// 不加引号生成的 SELECT 直接语法错误。
-			Column: quoteIdent(readxml.SnakeCase(variable.Name)),
-			GoType: variable.Type,
-		}
-
-		fieldMap[variable.Name] = field
-		gen.Fields = append(gen.Fields, field)
-	}
-
-	pk, ok := fieldMap[table.PrimaryKey.Variable]
-	if !ok {
-		return gen, fmt.Errorf("table %q primary key variable %q not found", table.Name, table.PrimaryKey.Variable)
-	}
-
-	pk.IsPrimaryKey = true
-	pk.AutoIncrement = table.PrimaryKey.AutoIncrement
-
-	gen.PK = pk
-	gen.AutoIncrement = pk.AutoIncrement
-
-	for i := range gen.Fields {
-		if gen.Fields[i].Name == pk.Name {
-			gen.Fields[i] = pk
-			break
+		fields[v.Name] = f
+		gen.Fields = append(gen.Fields, f)
+		if f.IsPrimaryKey {
+			gen.PK = f
+		} else {
+			gen.UpdateFields = append(gen.UpdateFields, f)
 		}
 	}
 
-	// INSERT:
-	// 自增 PK 不需要传。
-	for _, field := range gen.Fields {
-		if field.IsPrimaryKey && field.AutoIncrement {
-			continue
-		}
-
-		gen.InsertFields = append(gen.InsertFields, field)
+	// 身份表、Insert 回填、GetById 的缓存都按 int64 自增主键实现，其他主键一律拒绝。
+	switch {
+	case gen.PK.Name == "":
+		return gen, fmt.Errorf("table %q: 主键 %q 不在 bean 里", table.Name, pk.Variable)
+	case gen.PK.GoType != "int64" || !pk.AutoIncrement:
+		return gen, fmt.Errorf("table %q: 主键 %q 必须是 int64 且 autoIncrement=\"true\"", table.Name, pk.Variable)
+	case gen.PK.Sensitive:
+		return gen, fmt.Errorf("table %q: 主键 %q 不能标记 sensitive", table.Name, pk.Variable)
+	case len(gen.UpdateFields) == 0:
+		return gen, fmt.Errorf("table %q: 除主键外至少要有一列", table.Name)
+	case len(gen.UpdateFields) > 64:
+		return gen, fmt.Errorf("table %q: 除主键外最多 64 列（dirty 是 uint64 位掩码）", table.Name)
 	}
 
-	// UPDATE:
-	// PK 不更新，其余字段全部允许 dirty。
-	for _, field := range gen.Fields {
-		if field.IsPrimaryKey {
-			continue
-		}
-
-		gen.UpdateFields = append(gen.UpdateFields, field)
+	var cols, insertCols, insertValues []string
+	for _, f := range gen.Fields {
+		cols = append(cols, f.Column)
 	}
-
-	columns := make([]string, 0, len(gen.Fields))
-
-	for _, field := range gen.Fields {
-		columns = append(columns, field.Column)
+	for i, f := range gen.UpdateFields {
+		insertCols = append(insertCols, f.Column)
+		insertValues = append(insertValues, "$"+strconv.Itoa(i+1))
 	}
+	gen.SelectColumns = strings.Join(cols, ", ")
+	gen.InsertColumns = strings.Join(insertCols, ", ")
+	gen.InsertValues = strings.Join(insertValues, ", ")
 
-	gen.SelectColumns = strings.Join(columns, ", ")
-
-	// ------------------------------------------------------------
-	// 查询方法
-	// ------------------------------------------------------------
-
-	seen := make(map[string]struct{})
-
-	// PK:
-	// GetById / SelectById
-	pkQuery := readxml.QueryMethod{
-		Name:         pk.MethodName,
-		Params:       pk.Name + " " + pk.GoType,
-		Args:         pk.Name,
-		Where:        pk.Column + " = $1",
-		IsList:       false,
-		IsPrimaryKey: true,
-	}
-
+	// 查询方法：主键固定生成 GetById / SelectById；unique 索引生成 GetByXxx / SelectByXxx，
+	// 非 unique 索引生成 ListByXxx / SelectListByXxx。同一组列只能有一个查询。
+	pkQuery := gen.newQuery([]field{gen.PK}, true)
+	pkQuery.IsPrimaryKey = true
 	gen.QueryMethods = append(gen.QueryMethods, pkQuery)
-
-	seen[queryKey(pkQuery)] = struct{}{}
-
-	// Index:
-	//
-	// unique=true:
-	//     GetByUidActId / SelectByUidActId
-	//
-	// unique=false:
-	//     ListByUid / SelectListByUid
+	seen := map[string]bool{pk.Variable: true}
+	names := map[string]bool{pkQuery.Name: true}
 	for _, index := range table.Indexes {
-		varNames := readxml.SplitTrimSpace(index.Variable)
-
-		if len(varNames) == 0 {
+		vars := readxml.SplitTrimSpace(index.Variable)
+		key := strings.Join(vars, ",")
+		if len(vars) == 0 {
 			return gen, fmt.Errorf("table %q has empty index", table.Name)
 		}
+		if seen[key] {
+			return gen, fmt.Errorf("table %q: 索引 (%s) 和主键或另一个索引重复", table.Name, key)
+		}
+		seen[key] = true
 
-		params := make([]string, 0, len(varNames))
-		args := make([]string, 0, len(varNames))
-		conditions := make([]string, 0, len(varNames))
-		methodParts := make([]string, 0, len(varNames))
-
-		for i, variableName := range varNames {
-			field, ok := fieldMap[variableName]
+		indexFields := make([]field, 0, len(vars))
+		used := make(map[string]bool, len(vars))
+		for _, name := range vars {
+			f, ok := fields[name]
 			if !ok {
-				return gen, fmt.Errorf("table %q index references unknown variable %q", table.Name, variableName)
+				return gen, fmt.Errorf("table %q index references unknown variable %q", table.Name, name)
 			}
-
-			params = append(params, fmt.Sprintf("%s %s", field.Name, field.GoType))
-
-			args = append(args, field.Name)
-
-			conditions = append(conditions,
-				fmt.Sprintf("%s = $%d", field.Column, i+1),
-			)
-
-			methodParts = append(methodParts, field.MethodName)
+			if used[name] {
+				return gen, fmt.Errorf("table %q: 索引 (%s) 里列 %q 重复", table.Name, key, name)
+			}
+			used[name] = true
+			indexFields = append(indexFields, f)
 		}
-
-		query := readxml.QueryMethod{
-			Name:   strings.Join(methodParts, ""),
-			Params: strings.Join(params, ", "),
-			Args:   strings.Join(args, ", "),
-			Where:  strings.Join(conditions, " AND "),
-			IsList: !index.Unique,
+		q := gen.newQuery(indexFields, index.Unique)
+		if names[q.Name] {
+			return gen, fmt.Errorf("table %q: 索引 (%s) 生成的方法名 %s 和别的查询重复", table.Name, key, q.Name)
 		}
-
-		key := queryKey(query)
-
-		if _, exists := seen[key]; exists {
-			continue
-		}
-
-		seen[key] = struct{}{}
-
-		gen.QueryMethods = append(gen.QueryMethods, query)
+		names[q.Name] = true
+		gen.QueryMethods = append(gen.QueryMethods, q)
 	}
-
 	return gen, nil
 }
 
-func queryKey(query readxml.QueryMethod) string {
-	return fmt.Sprintf(
-		"%t|%s|%s|%s",
-		query.IsList,
-		query.Name,
-		query.Params,
-		query.Where,
-	)
+func (gen *tableGen) newQuery(fields []field, unique bool) queryMethod {
+	var name, params, args, sqlArgs, where, columns []string
+	for i, f := range fields {
+		name = append(name, f.MethodName)
+		params = append(params, f.Name+" "+f.GoType)
+		args = append(args, f.Name)
+		sqlArgs = append(sqlArgs, sqlArg(f, ""))
+		where = append(where, f.Column+" = $"+strconv.Itoa(i+1))
+		if !f.IsPrimaryKey {
+			columns = append(columns, "dirty"+gen.TypeName+f.MethodName)
+		}
+	}
+	return queryMethod{
+		Name:    strings.Join(name, ""),
+		Params:  strings.Join(params, ", "),
+		Args:    strings.Join(args, ", "),
+		SQLArgs: strings.Join(sqlArgs, ", "),
+		Where:   strings.Join(where, " AND "),
+		Columns: strings.Join(columns, " | "),
+		IsList:  !unique,
+	}
 }

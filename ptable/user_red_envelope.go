@@ -4,11 +4,6 @@ package ptable
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"math/bits"
-	"strconv"
-	"strings"
 
 	"pdbgen/dbctx"
 )
@@ -16,6 +11,20 @@ import (
 var UserRedEnvelopeTable redEnvelope
 
 type redEnvelope struct{}
+
+type RedEnvelope struct {
+	id            int64
+	uid           int64
+	actId         int32
+	lastRefreshAt int64
+	todayCount    int32
+	total         int32
+
+	loaded   bool   // 对应数据库里的一行：查出来的，或者 Insert 过的
+	deleted  bool   // 标记了删除，提交前 flush 成 DELETE
+	detached bool   // 脱离了事务：SetXxx / Delete 会 panic
+	dirty    uint64 // 改过、还没落库的列，第 i 位对应 updateColumnsRedEnvelope[i]
+}
 
 const (
 	dirtyRedEnvelopeUid           uint64 = 1 << 0
@@ -25,488 +34,229 @@ const (
 	dirtyRedEnvelopeTotal         uint64 = 1 << 4
 )
 
-type RedEnvelope struct {
-	id                int64
-	uid               int64
-	actId             int32
-	lastRefreshAt     int64
-	todayCount        int32
-	total             int32
-	loaded            bool
-	deleted           bool
-	origUid           int64
-	origActId         int32
-	origLastRefreshAt int64
-	origTodayCount    int32
-	origTotal         int32
-	dirty             uint64
+var updateColumnsRedEnvelope = []string{
+	"\"uid\"",
+	"\"act_id\"",
+	"\"last_refresh_at\"",
+	"\"today_count\"",
+	"\"total\"",
 }
 
-type redEnvelopeState struct {
-	id                int64
-	uid               int64
-	actId             int32
-	lastRefreshAt     int64
-	todayCount        int32
-	total             int32
-	loaded            bool
-	deleted           bool
-	origUid           int64
-	origActId         int32
-	origLastRefreshAt int64
-	origTodayCount    int32
-	origTotal         int32
-	dirty             uint64
-}
+const selectColumnsRedEnvelope = "\"id\", \"uid\", \"act_id\", \"last_refresh_at\", \"today_count\", \"total\""
 
 func NewRedEnvelope() *RedEnvelope {
 	return &RedEnvelope{}
 }
 
-func loadedRedEnvelope(
-	id int64,
-	uid int64,
-	actId int32,
-	lastRefreshAt int64,
-	todayCount int32,
-	total int32,
-) *RedEnvelope {
-	return &RedEnvelope{
-		id:                id,
-		uid:               uid,
-		actId:             actId,
-		lastRefreshAt:     lastRefreshAt,
-		todayCount:        todayCount,
-		total:             total,
-		loaded:            true,
-		origUid:           uid,
-		origActId:         actId,
-		origLastRefreshAt: lastRefreshAt,
-		origTodayCount:    todayCount,
-		origTotal:         total,
-	}
-}
-
 func (o *RedEnvelope) Id() int64 {
 	return o.id
-}
-func (o *RedEnvelope) SetUid(v int64) {
-	if o.uid == v {
-		return
-	}
-	o.uid = v
-	o.dirty |= dirtyRedEnvelopeUid
 }
 
 func (o *RedEnvelope) Uid() int64 {
 	return o.uid
 }
-func (o *RedEnvelope) SetActId(v int32) {
-	if o.actId == v {
-		return
+
+func (o *RedEnvelope) SetUid(v int64) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.actId = v
-	o.dirty |= dirtyRedEnvelopeActId
+	if o.uid != v {
+		o.uid = v
+		o.dirty |= dirtyRedEnvelopeUid
+	}
 }
 
 func (o *RedEnvelope) ActId() int32 {
 	return o.actId
 }
-func (o *RedEnvelope) SetLastRefreshAt(v int64) {
-	if o.lastRefreshAt == v {
-		return
+
+func (o *RedEnvelope) SetActId(v int32) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.lastRefreshAt = v
-	o.dirty |= dirtyRedEnvelopeLastRefreshAt
+	if o.actId != v {
+		o.actId = v
+		o.dirty |= dirtyRedEnvelopeActId
+	}
 }
 
 func (o *RedEnvelope) LastRefreshAt() int64 {
 	return o.lastRefreshAt
 }
-func (o *RedEnvelope) SetTodayCount(v int32) {
-	if o.todayCount == v {
-		return
+
+func (o *RedEnvelope) SetLastRefreshAt(v int64) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.todayCount = v
-	o.dirty |= dirtyRedEnvelopeTodayCount
+	if o.lastRefreshAt != v {
+		o.lastRefreshAt = v
+		o.dirty |= dirtyRedEnvelopeLastRefreshAt
+	}
 }
 
 func (o *RedEnvelope) TodayCount() int32 {
 	return o.todayCount
 }
-func (o *RedEnvelope) SetTotal(v int32) {
-	if o.total == v {
-		return
+
+func (o *RedEnvelope) SetTodayCount(v int32) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.total = v
-	o.dirty |= dirtyRedEnvelopeTotal
+	if o.todayCount != v {
+		o.todayCount = v
+		o.dirty |= dirtyRedEnvelopeTodayCount
+	}
 }
 
 func (o *RedEnvelope) Total() int32 {
 	return o.total
 }
 
-func (o *RedEnvelope) ResetToLoaded() {
-	o.uid = o.origUid
-	o.actId = o.origActId
-	o.lastRefreshAt = o.origLastRefreshAt
-	o.todayCount = o.origTodayCount
-	o.total = o.origTotal
-	o.deleted = false
+func (o *RedEnvelope) SetTotal(v int32) {
+	if o.detached {
+		dbctx.PanicDetached(o)
+	}
+	if o.total != v {
+		o.total = v
+		o.dirty |= dirtyRedEnvelopeTotal
+	}
+}
+
+// Delete 标记删除，提交前 flush 成 DELETE；同一事务里之后的查询都看不到这一行。
+func (o *RedEnvelope) Delete() {
+	if o.detached {
+		dbctx.PanicDetached(o)
+	}
+	if o.loaded {
+		o.deleted = true
+	}
+}
+
+// 以下实现 dbctx.Flusher。
+
+func (o *RedEnvelope) TableName() string { return "user_red_envelope" }
+
+func (o *RedEnvelope) Identity() int64 { return o.id }
+
+func (o *RedEnvelope) IsDeleted() bool { return o.deleted }
+
+func (o *RedEnvelope) SnapshotState() dbctx.RecordState { return *o }
+
+func (o *RedEnvelope) RestoreState(s dbctx.RecordState) { *o = s.(RedEnvelope) }
+
+func (o *RedEnvelope) Detach() {
+	if o.loaded {
+		o.detached = true
+	}
+}
+
+func (o *RedEnvelope) DirtyColumns() uint64 {
+	if !o.loaded || o.deleted {
+		return 0
+	}
+	return o.dirty
+}
+
+func (o *RedEnvelope) FlushStmt() (string, []any) {
+	switch {
+	case !o.loaded:
+		return "", nil
+	case o.deleted:
+		return "DELETE FROM \"user_red_envelope\" WHERE \"id\" = $1", []any{o.id}
+	case o.dirty == 0:
+		return "", nil
+	}
+	return dbctx.UpdateStmt("\"user_red_envelope\"", "\"id\"", o.id, updateColumnsRedEnvelope, o.dirty,
+		o.uid,
+		o.actId,
+		o.lastRefreshAt,
+		o.todayCount,
+		o.total,
+	)
+}
+
+func (o *RedEnvelope) FlushDone() {
+	if o.deleted {
+		o.loaded, o.deleted = false, false
+	}
 	o.dirty = 0
 }
 
-// Delete 把这一行标记为待删除；实际 DELETE 在事务提交前由 flush 统一发出。
-func (v *RedEnvelope) Delete() {
-	if !v.loaded || v.deleted {
-		return
-	}
-	v.deleted = true
-}
-
-// IsDeleted 报告这一行是否在本次事务里被标记删除。
-func (v *RedEnvelope) IsDeleted() bool {
-	return v.deleted
-}
-
-func (v *RedEnvelope) SnapshotState() dbctx.RecordState {
-	return redEnvelopeState{
-		id:                v.id,
-		uid:               v.uid,
-		actId:             v.actId,
-		lastRefreshAt:     v.lastRefreshAt,
-		todayCount:        v.todayCount,
-		total:             v.total,
-		loaded:            v.loaded,
-		deleted:           v.deleted,
-		origUid:           v.origUid,
-		origActId:         v.origActId,
-		origLastRefreshAt: v.origLastRefreshAt,
-		origTodayCount:    v.origTodayCount,
-		origTotal:         v.origTotal,
-		dirty:             v.dirty,
-	}
-}
-
-func (v *RedEnvelope) RestoreState(state dbctx.RecordState) {
-	s := state.(redEnvelopeState)
-	v.id = s.id
-	v.uid = s.uid
-	v.actId = s.actId
-	v.lastRefreshAt = s.lastRefreshAt
-	v.todayCount = s.todayCount
-	v.total = s.total
-	v.loaded = s.loaded
-	v.deleted = s.deleted
-	v.origUid = s.origUid
-	v.origActId = s.origActId
-	v.origLastRefreshAt = s.origLastRefreshAt
-	v.origTodayCount = s.origTodayCount
-	v.origTotal = s.origTotal
-	v.dirty = s.dirty
-}
-
-// ResetNew 把 Insert 回滚后的对象恢复成"未加载"状态。
-func (v *RedEnvelope) ResetNew() {
-	v.id = 0
-	v.loaded = false
-	v.deleted = false
-	v.dirty = 0
-}
-
-// TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
-// Transaction 用它们把同一行解析到同一个缓存记录
-// （xdb: getCachedTRecord / addCachedTRecord）。
-func (o *RedEnvelope) TableName() string {
-	return "user_red_envelope"
-}
-
-// Identity 实现 dbctx.Flusher。主键自增且还没回填时返回零值，
-// 表示这个对象还没有身份。
-func (o *RedEnvelope) Identity() int64 {
-	return o.id
-}
-
-const selectColumnsRedEnvelope = "\"id\", \"uid\", \"act_id\", \"last_refresh_at\", \"today_count\", \"total\""
-
 func scanRedEnvelope(s dbctx.Scanner) (*RedEnvelope, error) {
-	var (
-		id            int64
-		uid           int64
-		actId         int32
-		lastRefreshAt int64
-		todayCount    int32
-		total         int32
-	)
-	if err := s.Scan(
-		&id,
-		&uid,
-		&actId,
-		&lastRefreshAt,
-		&todayCount,
-		&total,
-	); err != nil {
+	o := &RedEnvelope{loaded: true}
+	if err := s.Scan(&o.id, &o.uid, &o.actId, &o.lastRefreshAt, &o.todayCount, &o.total); err != nil {
 		return nil, err
 	}
-	return loadedRedEnvelope(
-		id,
-		uid,
-		actId,
-		lastRefreshAt,
-		todayCount,
-		total,
-	), nil
+	return o, nil
 }
 
-func (o redEnvelope) getId(
-	ctx context.Context,
-	q dbctx.Querier,
-	id int64,
-) *RedEnvelope {
-	const query = "SELECT " + selectColumnsRedEnvelope +
-		" FROM \"user_red_envelope\"" +
-		" WHERE \"id\" = $1"
+func (t redEnvelope) queryId(ctx context.Context, q dbctx.Querier, id int64) *RedEnvelope {
+	const query = "SELECT " + selectColumnsRedEnvelope + " FROM \"user_red_envelope\" WHERE \"id\" = $1"
 	return dbctx.QueryOne(ctx, q, query, scanRedEnvelope, id)
 }
 
-func (o redEnvelope) GetById(
-	ctx context.Context,
-	id int64,
-) *RedEnvelope {
-	if v, ok := dbctx.GetCachedRecordAs[*RedEnvelope](ctx, "user_red_envelope", id); ok {
-		if v.IsDeleted() {
-			return nil
-		}
-		return v
+func (t redEnvelope) GetById(ctx context.Context, id int64) *RedEnvelope {
+	if o, ok := dbctx.GetCachedRecordAs[*RedEnvelope](ctx, "user_red_envelope", id); ok {
+		return o
 	}
-	return o.getId(
-		ctx,
-		dbctx.SQLTxFromCtx(ctx),
-		id,
-	)
+	return t.queryId(ctx, dbctx.SQLTxFromCtx(ctx), id)
 }
 
-func (o redEnvelope) SelectById(
-	ctx context.Context,
-	id int64,
-) *RedEnvelope {
-	return o.getId(
-		ctx,
-		dbctx.QuerierFromCtx(ctx),
-		id,
-	)
+func (t redEnvelope) SelectById(ctx context.Context, id int64) *RedEnvelope {
+	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx), id)
 }
 
-func (o redEnvelope) getUidActId(
-	ctx context.Context,
-	q dbctx.Querier,
-	uid int64, actId int32,
-) *RedEnvelope {
-	const query = "SELECT " + selectColumnsRedEnvelope +
-		" FROM \"user_red_envelope\"" +
-		" WHERE \"uid\" = $1 AND \"act_id\" = $2"
+func (t redEnvelope) queryUidActId(ctx context.Context, q dbctx.Querier, uid int64, actId int32) *RedEnvelope {
+	dbctx.CheckPredicate(ctx, "user_red_envelope", dirtyRedEnvelopeUid|dirtyRedEnvelopeActId)
+	const query = "SELECT " + selectColumnsRedEnvelope + " FROM \"user_red_envelope\" WHERE \"uid\" = $1 AND \"act_id\" = $2"
 	return dbctx.QueryOne(ctx, q, query, scanRedEnvelope, uid, actId)
 }
 
-func (o redEnvelope) GetByUidActId(
-	ctx context.Context,
-	uid int64, actId int32,
-) *RedEnvelope {
-	return o.getUidActId(
-		ctx,
-		dbctx.SQLTxFromCtx(ctx),
-		uid, actId,
-	)
+func (t redEnvelope) GetByUidActId(ctx context.Context, uid int64, actId int32) *RedEnvelope {
+	return t.queryUidActId(ctx, dbctx.SQLTxFromCtx(ctx), uid, actId)
 }
 
-func (o redEnvelope) SelectByUidActId(
-	ctx context.Context,
-	uid int64, actId int32,
-) *RedEnvelope {
-	return o.getUidActId(
-		ctx,
-		dbctx.QuerierFromCtx(ctx),
-		uid, actId,
-	)
+func (t redEnvelope) SelectByUidActId(ctx context.Context, uid int64, actId int32) *RedEnvelope {
+	return t.queryUidActId(ctx, dbctx.QuerierFromCtx(ctx), uid, actId)
 }
 
-// DeleteById 在事务里按主键标记删除；找不到返回 false。
-// 实际 DELETE 在事务提交前由 flush 统一发出，失败时由 memento 恢复。
-func (o redEnvelope) DeleteById(
-	ctx context.Context,
-	id int64,
-) bool {
-	v := o.GetById(ctx, id)
-	if v == nil {
+// DeleteById 按主键标记删除，提交前 flush 成 DELETE；找不到返回 false。
+func (t redEnvelope) DeleteById(ctx context.Context, id int64) bool {
+	o := t.GetById(ctx, id)
+	if o == nil {
 		return false
 	}
-	v.Delete()
+	o.Delete()
 	return true
 }
 
-func (o redEnvelope) getAll(
-	ctx context.Context,
-	q dbctx.Querier,
-) []*RedEnvelope {
-	const query = "SELECT " + selectColumnsRedEnvelope +
-		" FROM \"user_red_envelope\""
-	return dbctx.QueryList(ctx, q, query, scanRedEnvelope)
+const selectAllRedEnvelope = "SELECT " + selectColumnsRedEnvelope + " FROM \"user_red_envelope\""
+
+func (t redEnvelope) GetAll(ctx context.Context) []*RedEnvelope {
+	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx), selectAllRedEnvelope, scanRedEnvelope)
 }
 
-func (o redEnvelope) GetAll(
-	ctx context.Context,
-) []*RedEnvelope {
-	return o.getAll(ctx, dbctx.SQLTxFromCtx(ctx))
+func (t redEnvelope) SelectAll(ctx context.Context) []*RedEnvelope {
+	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx), selectAllRedEnvelope, scanRedEnvelope)
 }
 
-func (o redEnvelope) SelectAll(
-	ctx context.Context,
-) []*RedEnvelope {
-	return o.getAll(ctx, dbctx.QuerierFromCtx(ctx))
-}
-
-var ErrRedEnvelopeNotFound = errors.New(
-	"user_red_envelope: row not found at update time",
-)
-
-// FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
-// deleted 时返回 DELETE；Transaction 据此跳过没有变化的行。
-func (v *RedEnvelope) FlushStmt() (string, []any) {
-	if !v.loaded {
-		return "", nil
+// Insert 插入一个 NewRedEnvelope() 创建的新对象，主键由数据库生成并回填。
+func (t redEnvelope) Insert(ctx context.Context, o *RedEnvelope) {
+	if o.loaded {
+		panic("pdbgen: user_red_envelope: Insert 只接受 NewRedEnvelope() 创建、还没插入过的对象")
 	}
-	if v.deleted {
-		return "DELETE FROM \"user_red_envelope\" WHERE \"id\" = $1", []any{v.id}
-	}
-	if v.dirty == 0 {
-		return "", nil
-	}
-	var sb strings.Builder
-	args := make([]any, 0, bits.OnesCount64(v.dirty)+1)
-	sb.WriteString("UPDATE \"user_red_envelope\" SET ")
-	if v.dirty&dirtyRedEnvelopeUid != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.uid)
-		sb.WriteString("\"uid\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyRedEnvelopeActId != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.actId)
-		sb.WriteString("\"act_id\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyRedEnvelopeLastRefreshAt != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.lastRefreshAt)
-		sb.WriteString("\"last_refresh_at\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyRedEnvelopeTodayCount != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.todayCount)
-		sb.WriteString("\"today_count\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyRedEnvelopeTotal != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.total)
-		sb.WriteString("\"total\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	args = append(args, v.id)
-	sb.WriteString(" WHERE \"id\" = $")
-	sb.WriteString(strconv.Itoa(len(args)))
-	return sb.String(), args
-}
-
-// FlushDone 实现 dbctx.Flusher，在对应 UPDATE/DELETE 执行成功后回调。
-// UPDATE 同步 orig 快照并清空 dirty；DELETE 把对象置为未加载。
-// rows == 0 说明这一行已经不存在。
-func (v *RedEnvelope) FlushDone(rows int64) error {
-	if rows == 0 {
-		return ErrRedEnvelopeNotFound
-	}
-	if v.deleted {
-		v.dirty = 0
-		v.loaded = false
-		v.deleted = false
-		return nil
-	}
-	v.origUid = v.uid
-	v.origActId = v.actId
-	v.origLastRefreshAt = v.lastRefreshAt
-	v.origTodayCount = v.todayCount
-	v.origTotal = v.total
-	v.dirty = 0
-	return nil
-}
-
-// Update 是不经过 Transaction 的直接落库入口，
-// 生成代码内部不再调用它，仅供业务代码需要立即写库时使用。
-func (o redEnvelope) Update(
-	ctx context.Context,
-	v *RedEnvelope,
-) error {
-	query, args := v.FlushStmt()
-	if query == "" {
-		return nil
-	}
-	tag, err := dbctx.SQLTxFromCtx(ctx).Exec(ctx, query, args...)
-	if err != nil {
-		return fmt.Errorf("user_red_envelope update: %w", err)
-	}
-	return v.FlushDone(tag.RowsAffected())
-}
-
-func (o redEnvelope) Insert(
-	ctx context.Context,
-	v *RedEnvelope,
-) {
-	dbctx.RegisterNew(ctx, v)
 	tx := dbctx.SQLTxFromCtx(ctx)
-	const query = "INSERT INTO \"user_red_envelope\" " +
-		"(\"uid\", \"act_id\", \"last_refresh_at\", \"today_count\", \"total\") " +
-		"VALUES ($1, $2, $3, $4, $5)" +
-		" RETURNING \"id\""
-
-	row := tx.QueryRow(
-		ctx,
-		query,
-		v.uid,
-		v.actId,
-		v.lastRefreshAt,
-		v.todayCount,
-		v.total,
-	)
-	if err := row.Scan(
-		&v.id,
-	); err != nil {
+	dbctx.GetOrAddCachedRecord(ctx, o) // 主键还是 0：只登记快照，回滚时恢复成插入前的样子
+	const query = "INSERT INTO \"user_red_envelope\" (\"uid\", \"act_id\", \"last_refresh_at\", \"today_count\", \"total\") VALUES ($1, $2, $3, $4, $5) RETURNING \"id\""
+	if err := tx.QueryRow(ctx, query,
+		o.uid,
+		o.actId,
+		o.lastRefreshAt,
+		o.todayCount,
+		o.total,
+	).Scan(&o.id); err != nil {
 		panic(err)
 	}
-
-	v.loaded = true
-
-	v.origUid = v.uid
-
-	v.origActId = v.actId
-
-	v.origLastRefreshAt = v.lastRefreshAt
-
-	v.origTodayCount = v.todayCount
-
-	v.origTotal = v.total
-
-	v.dirty = 0
-	dbctx.GetOrAddCachedRecord(ctx, v)
+	o.loaded, o.dirty = true, 0
+	dbctx.GetOrAddCachedRecord(ctx, o) // 主键回填后进身份表
 }

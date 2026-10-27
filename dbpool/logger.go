@@ -2,8 +2,9 @@ package dbpool
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"pdbgen/dbctx"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -11,7 +12,25 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"pdbgen/dbctx"
 )
+
+// SetLogger 换掉 SQL 日志的落点，不设就用 slog.Default()。
+//
+// nil 表示回落到 slog.Default()，而且是**调用时**才解析——所以应用在
+// dbpool.Init 之后再 slog.SetDefault 也来得及。
+func SetLogger(l *slog.Logger) { sqlLog = l }
+
+// sqlLog 见 SetLogger。只由 SetLogger 写，读的时候统一走 log()。
+var sqlLog *slog.Logger
+
+func log() *slog.Logger {
+	if sqlLog != nil {
+		return sqlLog
+	}
+	return slog.Default()
+}
 
 type loggingSQLTx struct {
 	dbctx.SQLTx
@@ -19,35 +38,21 @@ type loggingSQLTx struct {
 
 func (o *loggingSQLTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	start := time.Now()
-
 	tag, err := o.SQLTx.Exec(ctx, sql, args...)
-
 	logSQL(start, sql, args, err)
-
 	return tag, err
 }
 
 func (o *loggingSQLTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	start := time.Now()
-
 	rows, err := o.SQLTx.Query(ctx, sql, args...)
-
 	logSQL(start, sql, args, err)
-
 	return rows, err
 }
 
 func (o *loggingSQLTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	start := time.Now()
-
-	row := o.SQLTx.QueryRow(ctx, sql, args...)
-
-	return &loggingRow{
-		row:   row,
-		start: start,
-		sql:   sql,
-		args:  args,
-	}
+	return &loggingRow{row: o.SQLTx.QueryRow(ctx, sql, args...), start: start, sql: sql, args: args}
 }
 
 // wrapLogger 只在 showSQL 打开时才包这一层。包上之后每条 SQL 都会记一条
@@ -93,21 +98,17 @@ func logBatch(start time.Time, batch *pgx.Batch, err error) {
 	log().Info("sql batch", "cost", cost, "count", len(stmts), "stmts", stmts)
 }
 
-var placeholderRE = regexp.MustCompile(`\$([1-9][0-9]*)`)
+var placeholderRE = regexp.MustCompile(`\$[1-9][0-9]*`)
 
-// formatSQL 把 $1 这类占位符换回实际值，日志里的语句就能直接粘去 psql 跑。
+// formatSQL 把 $1 这类占位符换成参数的字面量，日志里的语句可以直接粘去 psql 跑。
+// 直接替换文本，不经过 fmt 的格式串，SQL 里的 % 原样保留。
 func formatSQL(sql string, args []any) string {
-	sql = placeholderRE.ReplaceAllStringFunc(sql, func(s string) string {
-		n, _ := strconv.Atoi(s[1:])
-		return fmt.Sprintf("%%[%d]s", n)
+	sql = placeholderRE.ReplaceAllStringFunc(sql, func(p string) string {
+		if n, _ := strconv.Atoi(p[1:]); n <= len(args) {
+			return sqlLiteral(args[n-1])
+		}
+		return p
 	})
-
-	values := make([]any, len(args))
-	for i, arg := range args {
-		values[i] = sqlLiteral(arg)
-	}
-
-	sql = fmt.Sprintf(sql, values...)
 	sql = strings.TrimSpace(sql)
 	if !strings.HasSuffix(sql, ";") {
 		sql += ";"
@@ -115,16 +116,21 @@ func formatSQL(sql string, args []any) string {
 	return sql
 }
 
+// sqlLiteral 把参数写成 SQL 字面量；dbctx.Secret（敏感列）只打成 '***'。
 func sqlLiteral(v any) string {
 	switch x := v.(type) {
+	case nil:
+		return "NULL"
+	case dbctx.Secret:
+		return "'***'"
 	case string:
 		return "'" + strings.ReplaceAll(x, "'", "''") + "'"
 	default:
-		return fmt.Sprintf("%v", x)
+		return fmt.Sprint(x)
 	}
 }
 
-// loggingRow 拖到 Scan 才记：只调 QueryRow 不 Scan 的话语句根本没发出去。
+// loggingRow 拖到 Scan 才记：错误要到 Scan 才拿得到。
 type loggingRow struct {
 	row    pgx.Row
 	start  time.Time
@@ -135,11 +141,13 @@ type loggingRow struct {
 
 func (r *loggingRow) Scan(dest ...any) error {
 	err := r.row.Scan(dest...)
-
 	if !r.logged {
 		r.logged = true
-		logSQL(r.start, r.sql, r.args, err)
+		logErr := err
+		if errors.Is(err, pgx.ErrNoRows) {
+			logErr = nil // 查不到是正常结果（GetByXxx 返回 nil），不是 SQL 错误
+		}
+		logSQL(r.start, r.sql, r.args, logErr)
 	}
-
 	return err
 }

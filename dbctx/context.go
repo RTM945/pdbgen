@@ -4,275 +4,190 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/bits"
+	"strconv"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-type sqlTxKey struct{}
-type querierKey struct{}
-type transactionKey struct{}
-
+// Querier 是查询需要的最小接口：事务外是连接池，事务里是 SQLTx。
 type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-// SQLTx 是数据库事务：执行 SQL、提交或回滚。
-// 它只关心 SQL 原子性，不承载业务事务的语义；后者见 Transaction。
+// SQLTx 是数据库事务，只负责执行 SQL；提交和回滚由 dbpool.Procedure 负责。
 type SQLTx interface {
 	Querier
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 	SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults
 }
 
-// Scanner 抽象 pgx.Row 和 pgx.Rows 的公共部分，
-// 让 GetByXxx/ListByXxx 的生成代码共用同一个 scan 函数。
+// Scanner 是 pgx.Row 和 pgx.Rows 的公共部分，生成代码的 scan 函数共用它。
 type Scanner interface {
 	Scan(dest ...any) error
 }
 
-// RecordState 是生成代码的整条实体快照（字段值 + orig + dirty + id + loaded）。
-// 运行时只负责保存和回传，不关心里面的字段。
+// RecordState 是生成代码的整条实体快照，运行时只负责保存和回传。
 type RecordState any
 
-// Flusher 是可以被 Transaction 收集、在事务提交前批量落库的对象。
-// FlushStmt 返回空 query 表示这个对象没有被修改过，无需落库。
-// FlushDone 在对应语句执行成功后回调，用来同步 orig 状态、清 dirty，
-// 并根据受影响行数判断这一行是否还存在。
-//
-// TableName 和 Identity 一起给出一行的身份，Transaction 用它们把同一行解析到
-// 同一个缓存记录（xdb: getCachedTRecord / addCachedTRecord）。
-// 主键自增且还没回填（Insert 之前）时 Identity 返回 0，表示这个对象还没有身份。
+// Flusher 是生成的实体。Transaction 收集它们，提交前把修改合并成一个 Batch 落库。
 type Flusher interface {
+	// TableName 和 Identity 给出一行的身份；Identity 为 0 表示还没 Insert。
 	TableName() string
 	Identity() int64
+
+	// FlushStmt 返回待执行的 UPDATE（只含脏列）或 DELETE，没有修改时返回空串；
+	// FlushDone 在这条语句执行成功后调用。
 	FlushStmt() (query string, args []any)
-	FlushDone(rowsAffected int64) error
+	FlushDone()
 
-	// SnapshotState 返回整条实体的快照，用于事务失败时恢复内存状态。
+	// DirtyColumns 返回改过、还没落库的列（位掩码），CheckPredicate 用它判断查询条件是否失效。
+	DirtyColumns() uint64
+
+	// IsDeleted 报告这一行是否在本事务里标记了删除；查询会把它当作不存在。
+	IsDeleted() bool
+
+	// SnapshotState / RestoreState 保存、恢复整条实体，事务失败时用。
 	SnapshotState() RecordState
-
-	// RestoreState 用 SnapshotState 返回的快照恢复实体。
 	RestoreState(state RecordState)
 
-	// ResetNew 把 Insert 回滚后的新对象恢复成"未加载"状态。
-	ResetNew()
-
-	// IsDeleted 报告这一行是否在本次事务里被标记删除。
-	// QueryOne / QueryList 会据此过滤掉已删除的记录。
-	IsDeleted() bool
+	// Detach 把已加载的实体标记为脱离事务，之后 SetXxx / Delete 会 panic。
+	Detach()
 }
 
-// Transaction 是一次业务事务的工作集：身份表、脏对象、回滚和提交后任务。
-// 它由 Procedure 创建，随 Procedure 结束而销毁；SQL 事务本身见 SQLTx。
+// Transaction 是一次业务事务的工作集：SQL 事务、身份表、提交/回滚后任务。
+// 由 dbpool.Procedure 创建并放进 ctx，Procedure 结束即失效。
 type Transaction interface {
-	// GetCachedRecord 返回事务里已经缓存的记录（对应 xdb 的 getCachedTRecord）。
-	GetCachedRecord(tableName string, id int64) (Flusher, bool)
+	SQLTx() SQLTx
 
-	// AddCachedRecord 把记录放进事务缓存并返回规范记录
-	// （对应 xdb 的 addCachedTRecord）。同一行已经有记录时返回已有记录。
+	// GetCachedRecord 返回事务里已经缓存的记录（xdb: getCachedTRecord）。
+	GetCachedRecord(table string, id int64) (Flusher, bool)
+
+	// AddCachedRecord 把记录登记进事务并返回规范记录：同一行已经有记录时返回已有的
+	// （xdb: addCachedTRecord）。
 	AddCachedRecord(obj Flusher) Flusher
 
-	// RegisterNew 在 Insert 之前登记新建实体，回滚时恢复为未加载状态。
-	RegisterNew(obj Flusher)
+	// Records 按登记顺序返回事务里的记录。
+	Records() []Flusher
 
-	// Rollback 恢复本次事务内所有缓存记录的快照。
-	Rollback()
-
-	// AfterCommit 注册 COMMIT 明确成功后执行的任务。
 	AfterCommit(fn func(context.Context))
-
-	// AfterRollback 注册事务回滚后执行的任务。
 	AfterRollback(fn func(context.Context))
 }
 
-func HasSQLTx(ctx context.Context) bool {
-	return ctx.Value(sqlTxKey{}) != nil
-}
-
-func SQLTxFromCtx(ctx context.Context) SQLTx {
-	return ctx.Value(sqlTxKey{}).(SQLTx)
-}
-
-func SQLTxFromCtxOptional(ctx context.Context) (SQLTx, bool) {
-	res := ctx.Value(sqlTxKey{})
-	if res == nil {
-		return nil, false
-	}
-	return res.(SQLTx), true
-}
-
-func QuerierFromCtx(ctx context.Context) Querier {
-	if _, ok := SQLTxFromCtxOptional(ctx); ok {
-		panic("SelectByXXX cannot be called inside transaction")
-	}
-	return ctx.Value(querierKey{}).(Querier)
-}
-
-func WithSQLTx(ctx context.Context, tx SQLTx) context.Context {
-	return context.WithValue(ctx, sqlTxKey{}, tx)
-}
-
-func WithQuerier(ctx context.Context, q Querier) context.Context {
-	return context.WithValue(ctx, querierKey{}, q)
-}
+type transactionKey struct{}
+type querierKey struct{}
 
 func WithTransaction(ctx context.Context, txn Transaction) context.Context {
 	return context.WithValue(ctx, transactionKey{}, txn)
 }
 
 func TransactionFromCtxOptional(ctx context.Context) (Transaction, bool) {
-	value := ctx.Value(transactionKey{})
-	if value == nil {
-		return nil, false
-	}
-	return value.(Transaction), true
+	txn, ok := ctx.Value(transactionKey{}).(Transaction)
+	return txn, ok
 }
 
-// RegisterNew 在 Insert 之前把实体登记为"新建"，回滚时调用 ResetNew。
-// 没有事务时是空操作（Insert 本身会因为没有 SQLTx 而失败）。
-func RegisterNew(ctx context.Context, obj Flusher) {
-	if obj == nil {
-		return
-	}
+// InTransaction 报告 ctx 是否带着事务。
+func InTransaction(ctx context.Context) bool {
+	_, ok := TransactionFromCtxOptional(ctx)
+	return ok
+}
+
+func mustTransaction(ctx context.Context, what string) Transaction {
 	txn, ok := TransactionFromCtxOptional(ctx)
 	if !ok {
-		return
+		panic("pdbgen: " + what + " 只能在 dbpool.Procedure 里调用")
 	}
-	txn.RegisterNew(obj)
+	return txn
 }
 
-// AfterCommit 把 fn 注册到当前事务，在 COMMIT 明确成功后执行。
-// 没有事务时立即执行：没有提交点需要等待。
+// SQLTxFromCtx 返回 ctx 里的 SQL 事务，不在事务里时 panic。
+// GetByXxx / ListByXxx / GetAll / Insert 都经过这里。
+func SQLTxFromCtx(ctx context.Context) SQLTx {
+	return mustTransaction(ctx, "GetByXxx / ListByXxx / GetAll / Insert").SQLTx()
+}
+
+func WithQuerier(ctx context.Context, q Querier) context.Context {
+	return context.WithValue(ctx, querierKey{}, q)
+}
+
+// QuerierFromCtx 返回 dbpool.Query 放进 ctx 的连接池，SelectByXxx / SelectAll 都经过这里。
+// 在事务里调用会 panic：从池里另取一条连接读不到本事务的修改。
+func QuerierFromCtx(ctx context.Context) Querier {
+	if InTransaction(ctx) {
+		panic("pdbgen: SelectByXxx / SelectAll 不能在事务里调用，事务里用 GetByXxx / ListByXxx / GetAll")
+	}
+	q, ok := ctx.Value(querierKey{}).(Querier)
+	if !ok {
+		panic("pdbgen: SelectByXxx / SelectAll 只能在 dbpool.Query 里调用")
+	}
+	return q
+}
+
+// AfterCommit 注册 COMMIT 明确成功后执行的任务（发包、RPC、事件等外部副作用）。
+// 只能在事务里调用：在没有提交点的地方注册"提交后"任务，一般是 ctx 传错了。
 //
-// 钩子拿到的 ctx 保留调用方的值（请求 ID、身份等），但不带事务本身，
-// 也不带取消/超时——事务的总预算不应该把提交后的发包、事件打死。
-// 钩子需要超时就自己控制。
+// 钩子同步执行、按注册顺序；拿到的 ctx 保留调用方的值，但不带事务，也不带取消/超时。
 func AfterCommit(ctx context.Context, fn func(context.Context)) {
-	if fn == nil {
-		return
-	}
-	txn, ok := TransactionFromCtxOptional(ctx)
-	if !ok {
-		fn(context.WithoutCancel(ctx))
-		return
-	}
-	txn.AfterCommit(fn)
+	mustTransaction(ctx, "dbctx.AfterCommit").AfterCommit(fn)
 }
 
-// AfterRollback 把 fn 注册到当前事务，在事务回滚后执行。
-// 没有事务时立即执行，语义与 AfterCommit 对称。
+// AfterRollback 注册事务回滚后执行的任务（失败通知），只能在事务里调用。
+// 执行时内存对象已经恢复到进事务时的样子。
 func AfterRollback(ctx context.Context, fn func(context.Context)) {
-	if fn == nil {
-		return
-	}
-	txn, ok := TransactionFromCtxOptional(ctx)
-	if !ok {
-		fn(context.WithoutCancel(ctx))
-		return
-	}
-	txn.AfterRollback(fn)
+	mustTransaction(ctx, "dbctx.AfterRollback").AfterRollback(fn)
 }
 
-// GetCachedRecordAs 是 GetCachedRecord 的泛型版本：命中时把记录断言成 T。
-// 生成代码的 GetById 用它做缓存优先查询——命中就不发 SELECT。
-// 非事务或未命中返回零值和 false。
-func GetCachedRecordAs[T Flusher](ctx context.Context, tableName string, id int64) (T, bool) {
+// GetCachedRecordAs 是生成的 GetById 的缓存优先查询：事务里已经有这一行就直接返回，
+// 不发 SELECT；本事务标记了删除时返回零值和 true。非事务或未命中返回 false。
+func GetCachedRecordAs[T Flusher](ctx context.Context, table string, id int64) (T, bool) {
 	var zero T
 	txn, ok := TransactionFromCtxOptional(ctx)
 	if !ok {
 		return zero, false
 	}
-	rec, ok := txn.GetCachedRecord(tableName, id)
+	rec, ok := txn.GetCachedRecord(table, id)
 	if !ok {
 		return zero, false
 	}
-	typed, ok := rec.(T)
-	if !ok {
-		panic(fmt.Sprintf(
-			"pdbgen: %s id=%d 的缓存记录类型不一致：已有 %T，期望 %T",
-			tableName, id, rec, zero,
-		))
+	if rec.IsDeleted() {
+		return zero, true
 	}
-	return typed, true
+	return rec.(T), true
 }
 
-// GetOrAddCachedRecord 把 obj 解析到当前事务的缓存记录：
-// 命中 (TableName, Identity) 时返回已有对象，否则登记 obj 并返回它。
-// 非事务查询（例如 GM/RPC 的 SelectXxx）没有 Transaction，直接返回 obj。
-//
-// 对应 xdb 的 getCachedTRecord + addCachedTRecord 两步。pdbgen 是先扫描
-// 再解析，所以命中时新扫出来的对象会被丢弃；对象本身没有 identity 时不进缓存。
+// GetOrAddCachedRecord 把 obj 交给当前事务，返回这一行在事务里的规范记录：
+// 同一行已经有记录时丢弃 obj、返回已有的。
+// 不在事务里时把 obj 标记为脱离事务——事务外查出来的实体改了也不会落库，误改直接 panic。
 func GetOrAddCachedRecord[T Flusher](ctx context.Context, obj T) T {
-	txn, ok := TransactionFromCtxOptional(ctx)
-	if !ok {
-		return obj
+	if txn, ok := TransactionFromCtxOptional(ctx); ok {
+		return txn.AddCachedRecord(obj).(T)
 	}
-
-	id := obj.Identity()
-	if id != 0 {
-		if existing, ok := txn.GetCachedRecord(obj.TableName(), id); ok {
-			canonical, ok := existing.(T)
-			if !ok {
-				panic(fmt.Sprintf(
-					"pdbgen: %s id=%d 的缓存记录类型不一致：已有 %T，新来 %T",
-					obj.TableName(), id, existing, obj,
-				))
-			}
-			return canonical
-		}
-	}
-
-	added := txn.AddCachedRecord(obj)
-	canonical, ok := added.(T)
-	if !ok {
-		panic(fmt.Sprintf(
-			"pdbgen: %s id=%d 的缓存记录类型不一致：返回 %T，期望 %T",
-			obj.TableName(), id, added, obj,
-		))
-	}
-	return canonical
+	obj.Detach()
+	return obj
 }
 
-// Deprecated: use GetOrAddCachedRecord.
-func Track[T Flusher](ctx context.Context, obj T) T {
-	return GetOrAddCachedRecord(ctx, obj)
-}
-
-// QueryOne 是 GetByXxx/SelectByXxx 生成代码的公共实现：
-// 查询单行，无结果返回零值，查到则登记进 Transaction（若有）。
-func QueryOne[T Flusher](
-	ctx context.Context,
-	q Querier,
-	query string,
-	scan func(Scanner) (T, error),
-	args ...any,
-) T {
+// QueryOne 是单行查询的公共实现：查不到返回零值；查到的行解析成事务里的规范记录，
+// 本事务标记了删除的行当作查不到。
+func QueryOne[T Flusher](ctx context.Context, q Querier, query string, scan func(Scanner) (T, error), args ...any) T {
 	var zero T
-	row := q.QueryRow(ctx, query, args...)
-	obj, err := scan(row)
+	obj, err := scan(q.QueryRow(ctx, query, args...))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return zero
+	}
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return zero
-		}
 		panic(err)
 	}
-	obj = GetOrAddCachedRecord(ctx, obj)
-	if obj.IsDeleted() {
+	if obj = GetOrAddCachedRecord(ctx, obj); obj.IsDeleted() {
 		return zero
 	}
 	return obj
 }
 
-// QueryList 是 ListByXxx/SelectListByXxx/GetAll/SelectAll 的生成代码公共实现。
-func QueryList[T Flusher](
-	ctx context.Context,
-	q Querier,
-	query string,
-	scan func(Scanner) (T, error),
-	args ...any,
-) []T {
+// QueryList 是列表查询的公共实现，规则同 QueryOne。
+func QueryList[T Flusher](ctx context.Context, q Querier, query string, scan func(Scanner) (T, error), args ...any) []T {
 	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
 		panic(err)
@@ -285,11 +200,9 @@ func QueryList[T Flusher](
 		if err != nil {
 			panic(err)
 		}
-		obj = GetOrAddCachedRecord(ctx, obj)
-		if obj.IsDeleted() {
-			continue
+		if obj = GetOrAddCachedRecord(ctx, obj); !obj.IsDeleted() {
+			result = append(result, obj)
 		}
-		result = append(result, obj)
 	}
 	if err := rows.Err(); err != nil {
 		panic(err)
@@ -297,33 +210,55 @@ func QueryList[T Flusher](
 	return result
 }
 
-// Deprecated: use SQLTx.
-type TX = SQLTx
-
-// Deprecated: use SQLTxFromCtx.
-func TxFromCtx(ctx context.Context) SQLTx {
-	return SQLTxFromCtx(ctx)
+// CheckPredicate 是事务里条件查询的守卫：table 表有记录在 columns 这些列上改了、还没落库时 panic。
+// 修改要到提交前才统一落库，SELECT 按库里的旧值过滤，结果会多出或漏掉这些行——
+// 所以同一事务里，用作查询条件的列必须先查后改。按主键查不受影响（主键不能改）。
+func CheckPredicate(ctx context.Context, table string, columns uint64) {
+	txn, ok := TransactionFromCtxOptional(ctx)
+	if !ok {
+		return
+	}
+	for _, rec := range txn.Records() {
+		if rec.TableName() == table && rec.DirtyColumns()&columns != 0 {
+			panic(fmt.Sprintf(
+				"pdbgen: %s id=%d 在本事务里改了查询条件用到的列、还没落库，不能再按这些列查 %s"+
+					"（SELECT 按库里的旧值过滤，结果会多行或漏行）；请把查询挪到修改之前",
+				table, rec.Identity(), table,
+			))
+		}
+	}
 }
 
-// Deprecated: use SQLTxFromCtxOptional.
-func TxFromCtxOptional(ctx context.Context) (SQLTx, bool) {
-	return SQLTxFromCtxOptional(ctx)
+// PanicDetached 是生成代码 SetXxx / Delete 的守卫，实体已经脱离事务时调用。
+func PanicDetached(rec Flusher) {
+	panic(fmt.Sprintf(
+		"pdbgen: %s id=%d 已脱离事务（在事务外查出来的，或者所属事务已经结束），改了也不会落库；"+
+			"请在 dbpool.Procedure 里用 GetByXxx 重新查询后再改",
+		rec.TableName(), rec.Identity(),
+	))
 }
 
-// Deprecated: use HasSQLTx.
-func HasTx(ctx context.Context) bool {
-	return HasSQLTx(ctx)
-}
+// Secret 包装敏感列的参数值：pgx 按底层 string 编码，SQL 日志里只打成 '***'。
+// pdb.xml 里 sensitive="true" 的列由生成代码自动包装。
+type Secret string
 
-// Deprecated: use WithSQLTx.
-func WithTx(ctx context.Context, tx SQLTx) context.Context {
-	return WithSQLTx(ctx, tx)
-}
-
-// Deprecated: use Transaction.
-type UnitOfWork = Transaction
-
-// Deprecated: use WithTransaction.
-func WithUnitOfWork(ctx context.Context, txn Transaction) context.Context {
-	return WithTransaction(ctx, txn)
+// UpdateStmt 拼只含脏列的 UPDATE，供生成代码的 FlushStmt 使用。
+// columns[i] / values[i] 是第 i 个可更新列（已加引号），dirty 的第 i 位表示它改过；主键是最后一个参数。
+func UpdateStmt(table, pkColumn string, pk int64, columns []string, dirty uint64, values ...any) (string, []any) {
+	var sb strings.Builder
+	args := make([]any, 0, bits.OnesCount64(dirty)+1)
+	sb.WriteString("UPDATE " + table + " SET ")
+	for i, col := range columns {
+		if dirty&(1<<i) == 0 {
+			continue
+		}
+		if len(args) > 0 {
+			sb.WriteString(", ")
+		}
+		args = append(args, values[i])
+		sb.WriteString(col + " = $" + strconv.Itoa(len(args)))
+	}
+	args = append(args, pk)
+	sb.WriteString(" WHERE " + pkColumn + " = $" + strconv.Itoa(len(args)))
+	return sb.String(), args
 }

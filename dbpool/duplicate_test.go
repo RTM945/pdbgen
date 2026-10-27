@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
@@ -12,21 +11,20 @@ import (
 	"pdbgen/readxml"
 )
 
-// 集成测试要连真实 PG（见 README 的 docker 命令）。连不上直接 skip，
-// 让没有数据库的环境仍然能跑 go test ./...。
+// 集成测试要连真实 PG（见 README 的 docker 命令）。连不上时默认 skip，让没有数据库的
+// 环境仍然能跑 go test ./...；设置 PDBGEN_REQUIRE_DB=1（CI 里）则直接失败，免得
+// "全部 skip" 被当成 "全部通过"。
 var (
-	testInitOnce sync.Once
-	testInitErr  error
+	testSchema  *readxml.Schema
+	testInitErr error
 )
 
 // TestMain 让整个包的测试共用连接池，并在结束时收摊。
 // 连不上库时把错误交给各个用例，由它们 skip。
 func TestMain(m *testing.M) {
-	schema, err := readxml.LoadSchema("../pdb.xml")
-	if err != nil {
-		testInitErr = err
-	} else {
-		testInitErr = Init(context.Background(), schema)
+	testSchema, testInitErr = readxml.LoadSchema("../pdb.xml")
+	if testInitErr == nil {
+		testInitErr = Init(context.Background(), testSchema)
 	}
 
 	code := m.Run()
@@ -45,18 +43,22 @@ func setupTestDB(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 
+	skip := t.Skipf
+	if os.Getenv("PDBGEN_REQUIRE_DB") != "" {
+		skip = t.Fatalf
+	}
 	if testInitErr != nil {
-		t.Skipf("跳过集成测试，初始化失败: %v", testInitErr)
+		skip("跳过集成测试，初始化失败: %v", testInitErr)
 	}
 	// 注意这里的 dbpool 是包内那个池变量（包级 var dbpool *pgxpool.Pool），
 	// dbpool.Ping 是 (*pgxpool.Pool).Ping 的方法值，不是包级函数。
 	if err := dbpool.Ping(ctx); err != nil {
-		t.Skipf("跳过集成测试，连不上 pdb.xml 里的数据库（需要 README 里的 docker 环境）: %v", err)
+		skip("跳过集成测试，连不上 pdb.xml 里的数据库（需要 README 里的 docker 环境）: %v", err)
 	}
 }
 
 // catchPanic 跑 fn 并返回 panic 的内容，没 panic 就返回空串。
-// panic 由 WithTxPrepare 的 defer 回滚后原样重抛，必须包住整个 WithTx 调用。
+// panic 由 Procedure 的 defer 回滚后原样重抛，必须包住整个 WithTx 调用。
 func catchPanic(t *testing.T, fn func()) (recovered string) {
 	t.Helper()
 

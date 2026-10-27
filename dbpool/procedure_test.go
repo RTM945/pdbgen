@@ -78,21 +78,3 @@ func TestProcedureAppliesTimeout(t *testing.T) {
 		t.Fatal("ProcedureOptions.Timeout 应该体现在 ctx 的 deadline 上")
 	}
 }
-
-// TestWithTryAdvisoryLockStillWorks 旧的 With*Lock* 入口保留为薄封装，
-// 行为与 Procedure 一致。
-func TestWithTryAdvisoryLockStillWorks(t *testing.T) {
-	setupTestDB(t)
-
-	key := time.Now().UnixNano()
-	var called bool
-	if err := WithTryAdvisoryLock(t.Context(), key, func(context.Context) error {
-		called = true
-		return nil
-	}); err != nil {
-		t.Fatalf("WithTryAdvisoryLock 失败: %v", err)
-	}
-	if !called {
-		t.Fatal("WithTryAdvisoryLock 应该执行回调")
-	}
-}

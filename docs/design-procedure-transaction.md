@@ -1,6 +1,7 @@
 # Procedure 与 Transaction：职责划分与命名（设计提案）
 
 > 状态：提案，Phase 1（命名迁移）、Phase 2（AfterCommit / AfterRollback）、Phase 3（身份表）、Phase 4（Procedure 入口）、Phase 5（memento 回滚）已实施；其余阶段未实施。
+> 2026-10-28：`WithTxPrepare`、`With*AdvisoryLock*` 薄封装、`RegisterNew` / `ResetNew`、`ResetToLoaded` 已删除，`Procedure` 是唯一入口，嵌套事务直接拒绝。现状以 [design.md](design.md) 为准，本文只作为设计过程的记录。
 > 参考实现：`C:\Dev\xdb.jar.src1`（xdb）的 `Procedure` / `Transaction` / `Savepoint`。
 > 实施时：同步修改 [design.md](design.md)，并在它的"变更记录"里留痕。
 

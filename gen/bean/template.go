@@ -6,11 +6,6 @@ package {{ .Package }}
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"math/bits"
-	"strconv"
-	"strings"
 
 	"pdbgen/dbctx"
 )
@@ -19,397 +14,185 @@ var {{ .TableAccessor }} {{ .ReceiverName }}
 
 type {{ .ReceiverName }} struct{}
 
+type {{ .TypeName }} struct {
+{{- range .Fields }}
+	{{ .Name }} {{ .GoType }}
+{{- end }}
+
+	loaded   bool   // 对应数据库里的一行：查出来的，或者 Insert 过的
+	deleted  bool   // 标记了删除，提交前 flush 成 DELETE
+	detached bool   // 脱离了事务：SetXxx / Delete 会 panic
+	dirty    uint64 // 改过、还没落库的列，第 i 位对应 updateColumns{{ .TypeName }}[i]
+}
+
 const (
 {{- range $i, $f := .UpdateFields }}
 	dirty{{ $.TypeName }}{{ $f.MethodName }} uint64 = 1 << {{ $i }}
 {{- end }}
 )
 
-type {{ .TypeName }} struct {
-{{- range .Fields }}
-	{{ .Name }} {{ .GoType }}
-{{- end }}
-	loaded  bool
-	deleted bool
+var updateColumns{{ .TypeName }} = []string{
 {{- range .UpdateFields }}
-	orig{{ .MethodName }} {{ .GoType }}
+	"{{ .Column }}",
 {{- end }}
-	dirty uint64
 }
 
-type {{ .ReceiverName }}State struct {
-{{- range .Fields }}
-	{{ .Name }} {{ .GoType }}
-{{- end }}
-	loaded  bool
-	deleted bool
-{{- range .UpdateFields }}
-	orig{{ .MethodName }} {{ .GoType }}
-{{- end }}
-	dirty uint64
-}
+const selectColumns{{ .TypeName }} = "{{ .SelectColumns }}"
 
 func New{{ .TypeName }}() *{{ .TypeName }} {
 	return &{{ .TypeName }}{}
 }
 
-func loaded{{ .TypeName }}(
-{{- range .Fields }}
-	{{ .Name }} {{ .GoType }},
-{{- end }}
-) *{{ .TypeName }} {
-	return &{{ .TypeName }}{
-{{- range .Fields }}
-		{{ .Name }}: {{ .Name }},
-{{- end }}
-		loaded: true,
-{{- range .UpdateFields }}
-		orig{{ .MethodName }}: {{ .Name }},
-{{- end }}
-	}
+func (o *{{ .TypeName }}) {{ .PK.MethodName }}() int64 {
+	return o.{{ .PK.Name }}
 }
-
-{{ range .Fields }}
-{{- if .IsPrimaryKey }}
+{{ range .UpdateFields }}
 func (o *{{ $.TypeName }}) {{ .MethodName }}() {{ .GoType }} {
 	return o.{{ .Name }}
 }
-{{- else }}
+
 func (o *{{ $.TypeName }}) Set{{ .MethodName }}(v {{ .GoType }}) {
-	if o.{{ .Name }} == v {
-		return
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.{{ .Name }} = v
-	o.dirty |= dirty{{ $.TypeName }}{{ .MethodName }}
+	if o.{{ .Name }} != v {
+		o.{{ .Name }} = v
+		o.dirty |= dirty{{ $.TypeName }}{{ .MethodName }}
+	}
+}
+{{ end }}
+// Delete 标记删除，提交前 flush 成 DELETE；同一事务里之后的查询都看不到这一行。
+func (o *{{ .TypeName }}) Delete() {
+	if o.detached {
+		dbctx.PanicDetached(o)
+	}
+	if o.loaded {
+		o.deleted = true
+	}
 }
 
-func (o *{{ $.TypeName }}) {{ .MethodName }}() {{ .GoType }} {
-	return o.{{ .Name }}
-}
-{{- end }}
-{{- end }}
+// 以下实现 dbctx.Flusher。
 
-func (o *{{ .TypeName }}) ResetToLoaded() {
+func (o *{{ .TypeName }}) TableName() string { return "{{ .TableName }}" }
+
+func (o *{{ .TypeName }}) Identity() int64 { return o.{{ .PK.Name }} }
+
+func (o *{{ .TypeName }}) IsDeleted() bool { return o.deleted }
+
+func (o *{{ .TypeName }}) SnapshotState() dbctx.RecordState { return *o }
+
+func (o *{{ .TypeName }}) RestoreState(s dbctx.RecordState) { *o = s.({{ .TypeName }}) }
+
+func (o *{{ .TypeName }}) Detach() {
+	if o.loaded {
+		o.detached = true
+	}
+}
+
+func (o *{{ .TypeName }}) DirtyColumns() uint64 {
+	if !o.loaded || o.deleted {
+		return 0
+	}
+	return o.dirty
+}
+
+func (o *{{ .TypeName }}) FlushStmt() (string, []any) {
+	switch {
+	case !o.loaded:
+		return "", nil
+	case o.deleted:
+		return "DELETE FROM {{ quote .TableName }} WHERE {{ .PK.Column }} = $1", []any{o.{{ .PK.Name }}}
+	case o.dirty == 0:
+		return "", nil
+	}
+	return dbctx.UpdateStmt("{{ quote .TableName }}", "{{ .PK.Column }}", o.{{ .PK.Name }}, updateColumns{{ .TypeName }}, o.dirty,
 {{- range .UpdateFields }}
-	o.{{ .Name }} = o.orig{{ .MethodName }}
+		{{ sqlArg . "o." }},
 {{- end }}
-	o.deleted = false
+	)
+}
+
+func (o *{{ .TypeName }}) FlushDone() {
+	if o.deleted {
+		o.loaded, o.deleted = false, false
+	}
 	o.dirty = 0
 }
 
-// Delete 把这一行标记为待删除；实际 DELETE 在事务提交前由 flush 统一发出。
-func (v *{{ .TypeName }}) Delete() {
-	if !v.loaded || v.deleted {
-		return
-	}
-	v.deleted = true
-}
-
-// IsDeleted 报告这一行是否在本次事务里被标记删除。
-func (v *{{ .TypeName }}) IsDeleted() bool {
-	return v.deleted
-}
-
-func (v *{{ .TypeName }}) SnapshotState() dbctx.RecordState {
-	return {{ .ReceiverName }}State{
-{{- range .Fields }}
-		{{ .Name }}: v.{{ .Name }},
-{{- end }}
-		loaded:  v.loaded,
-		deleted: v.deleted,
-{{- range .UpdateFields }}
-		orig{{ .MethodName }}: v.orig{{ .MethodName }},
-{{- end }}
-		dirty: v.dirty,
-	}
-}
-
-func (v *{{ .TypeName }}) RestoreState(state dbctx.RecordState) {
-	s := state.({{ .ReceiverName }}State)
-{{- range .Fields }}
-	v.{{ .Name }} = s.{{ .Name }}
-{{- end }}
-	v.loaded = s.loaded
-	v.deleted = s.deleted
-{{- range .UpdateFields }}
-	v.orig{{ .MethodName }} = s.orig{{ .MethodName }}
-{{- end }}
-	v.dirty = s.dirty
-}
-
-// ResetNew 把 Insert 回滚后的对象恢复成"未加载"状态。
-func (v *{{ .TypeName }}) ResetNew() {
-{{- if .AutoIncrement }}
-	v.{{ .PK.Name }} = 0
-{{- end }}
-	v.loaded = false
-	v.deleted = false
-	v.dirty = 0
-}
-
-// TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
-// Transaction 用它们把同一行解析到同一个缓存记录
-// （xdb: getCachedTRecord / addCachedTRecord）。
-func (o *{{ .TypeName }}) TableName() string {
-	return "{{ .TableName }}"
-}
-
-// Identity 实现 dbctx.Flusher。主键自增且还没回填时返回零值，
-// 表示这个对象还没有身份。
-func (o *{{ .TypeName }}) Identity() int64 {
-	return o.{{ .PK.Name }}
-}
-
-const selectColumns{{ .TypeName }} = "{{ .SelectColumns }}"
-
 func scan{{ .TypeName }}(s dbctx.Scanner) (*{{ .TypeName }}, error) {
-	var (
-{{- range .Fields }}
-		{{ .Name }} {{ .GoType }}
-{{- end }}
-	)
-	if err := s.Scan(
-{{- range .Fields }}
-		&{{ .Name }},
-{{- end }}
-	); err != nil {
+	o := &{{ .TypeName }}{loaded: true}
+	if err := s.Scan({{ range $i, $f := .Fields }}{{ if $i }}, {{ end }}&o.{{ $f.Name }}{{ end }}); err != nil {
 		return nil, err
 	}
-	return loaded{{ .TypeName }}(
-{{- range .Fields }}
-		{{ .Name }},
-{{- end }}
-	), nil
+	return o, nil
 }
-
 {{ range .QueryMethods }}
+func (t {{ $.ReceiverName }}) query{{ .Name }}(ctx context.Context, q dbctx.Querier, {{ .Params }}) {{ if .IsList }}[]{{ end }}*{{ $.TypeName }} {
+{{- if .Columns }}
+	dbctx.CheckPredicate(ctx, "{{ $.TableName }}", {{ .Columns }})
+{{- end }}
+	const query = "SELECT " + selectColumns{{ $.TypeName }} + " FROM {{ quote $.TableName }} WHERE {{ .Where }}"
+	return dbctx.Query{{ if .IsList }}List{{ else }}One{{ end }}(ctx, q, query, scan{{ $.TypeName }}, {{ .SQLArgs }})
+}
 {{ if .IsList }}
-func (o {{ $.ReceiverName }}) list{{ .Name }}(
-	ctx context.Context,
-	q dbctx.Querier,
-	{{ .Params }},
-) []*{{ $.TypeName }} {
-	const query =
-		"SELECT " + selectColumns{{ $.TypeName }} +
-		" FROM {{ quote $.TableName }}" +
-		" WHERE {{ .Where }}"
-	return dbctx.QueryList(ctx, q, query, scan{{ $.TypeName }}, {{ .Args }})
+func (t {{ $.ReceiverName }}) ListBy{{ .Name }}(ctx context.Context, {{ .Params }}) []*{{ $.TypeName }} {
+	return t.query{{ .Name }}(ctx, dbctx.SQLTxFromCtx(ctx), {{ .Args }})
 }
 
-func (o {{ $.ReceiverName }}) ListBy{{ .Name }}(
-	ctx context.Context,
-	{{ .Params }},
-) []*{{ $.TypeName }} {
-	return o.list{{ .Name }}(
-		ctx,
-		dbctx.SQLTxFromCtx(ctx),
-		{{ .Args }},
-	)
-}
-
-func (o {{ $.ReceiverName }}) SelectListBy{{ .Name }}(
-	ctx context.Context,
-	{{ .Params }},
-) []*{{ $.TypeName }} {
-	return o.list{{ .Name }}(
-		ctx,
-		dbctx.QuerierFromCtx(ctx),
-		{{ .Args }},
-	)
+func (t {{ $.ReceiverName }}) SelectListBy{{ .Name }}(ctx context.Context, {{ .Params }}) []*{{ $.TypeName }} {
+	return t.query{{ .Name }}(ctx, dbctx.QuerierFromCtx(ctx), {{ .Args }})
 }
 {{ else }}
-func (o {{ $.ReceiverName }}) get{{ .Name }}(
-	ctx context.Context,
-	q dbctx.Querier,
-	{{ .Params }},
-) *{{ $.TypeName }} {
-	const query =
-		"SELECT " + selectColumns{{ $.TypeName }} +
-		" FROM {{ quote $.TableName }}" +
-		" WHERE {{ .Where }}"
-	return dbctx.QueryOne(ctx, q, query, scan{{ $.TypeName }}, {{ .Args }})
-}
-
-func (o {{ $.ReceiverName }}) GetBy{{ .Name }}(
-	ctx context.Context,
-	{{ .Params }},
-) *{{ $.TypeName }} {
+func (t {{ $.ReceiverName }}) GetBy{{ .Name }}(ctx context.Context, {{ .Params }}) *{{ $.TypeName }} {
 {{- if .IsPrimaryKey }}
-	if v, ok := dbctx.GetCachedRecordAs[*{{ $.TypeName }}](ctx, "{{ $.TableName }}", {{ .Args }}); ok {
-		if v.IsDeleted() {
-			return nil
-		}
-		return v
+	if o, ok := dbctx.GetCachedRecordAs[*{{ $.TypeName }}](ctx, "{{ $.TableName }}", {{ .Args }}); ok {
+		return o
 	}
 {{- end }}
-	return o.get{{ .Name }}(
-		ctx,
-		dbctx.SQLTxFromCtx(ctx),
-		{{ .Args }},
-	)
+	return t.query{{ .Name }}(ctx, dbctx.SQLTxFromCtx(ctx), {{ .Args }})
 }
 
-func (o {{ $.ReceiverName }}) SelectBy{{ .Name }}(
-	ctx context.Context,
-	{{ .Params }},
-) *{{ $.TypeName }} {
-	return o.get{{ .Name }}(
-		ctx,
-		dbctx.QuerierFromCtx(ctx),
-		{{ .Args }},
-	)
+func (t {{ $.ReceiverName }}) SelectBy{{ .Name }}(ctx context.Context, {{ .Params }}) *{{ $.TypeName }} {
+	return t.query{{ .Name }}(ctx, dbctx.QuerierFromCtx(ctx), {{ .Args }})
 }
 {{ end }}
-{{ end }}
-
-// DeleteBy{{ .PK.MethodName }} 在事务里按主键标记删除；找不到返回 false。
-// 实际 DELETE 在事务提交前由 flush 统一发出，失败时由 memento 恢复。
-func (o {{ .ReceiverName }}) DeleteBy{{ .PK.MethodName }}(
-	ctx context.Context,
-	{{ .PK.Name }} {{ .PK.GoType }},
-) bool {
-	v := o.GetBy{{ .PK.MethodName }}(ctx, {{ .PK.Name }})
-	if v == nil {
+{{- end }}
+// DeleteBy{{ .PK.MethodName }} 按主键标记删除，提交前 flush 成 DELETE；找不到返回 false。
+func (t {{ .ReceiverName }}) DeleteBy{{ .PK.MethodName }}(ctx context.Context, {{ .PK.Name }} int64) bool {
+	o := t.GetBy{{ .PK.MethodName }}(ctx, {{ .PK.Name }})
+	if o == nil {
 		return false
 	}
-	v.Delete()
+	o.Delete()
 	return true
 }
 
-func (o {{ .ReceiverName }}) getAll(
-	ctx context.Context,
-	q dbctx.Querier,
-) []*{{ .TypeName }} {
-	const query =
-		"SELECT " + selectColumns{{ .TypeName }} +
-		" FROM {{ quote .TableName }}"
-	return dbctx.QueryList(ctx, q, query, scan{{ .TypeName }})
+const selectAll{{ .TypeName }} = "SELECT " + selectColumns{{ .TypeName }} + " FROM {{ quote .TableName }}"
+
+func (t {{ .ReceiverName }}) GetAll(ctx context.Context) []*{{ .TypeName }} {
+	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx), selectAll{{ .TypeName }}, scan{{ .TypeName }})
 }
 
-func (o {{ .ReceiverName }}) GetAll(
-	ctx context.Context,
-) []*{{ .TypeName }} {
-	return o.getAll(ctx, dbctx.SQLTxFromCtx(ctx))
+func (t {{ .ReceiverName }}) SelectAll(ctx context.Context) []*{{ .TypeName }} {
+	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx), selectAll{{ .TypeName }}, scan{{ .TypeName }})
 }
 
-func (o {{ .ReceiverName }}) SelectAll(
-	ctx context.Context,
-) []*{{ .TypeName }} {
-	return o.getAll(ctx, dbctx.QuerierFromCtx(ctx))
-}
-
-var {{ .ErrorName }} = errors.New(
-	"{{ .TableName }}: row not found at update time",
-)
-
-// FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
-// deleted 时返回 DELETE；Transaction 据此跳过没有变化的行。
-func (v *{{ .TypeName }}) FlushStmt() (string, []any) {
-	if !v.loaded {
-		return "", nil
+// Insert 插入一个 New{{ .TypeName }}() 创建的新对象，主键由数据库生成并回填。
+func (t {{ .ReceiverName }}) Insert(ctx context.Context, o *{{ .TypeName }}) {
+	if o.loaded {
+		panic("pdbgen: {{ .TableName }}: Insert 只接受 New{{ .TypeName }}() 创建、还没插入过的对象")
 	}
-	if v.deleted {
-		return "DELETE FROM {{ quote .TableName }} WHERE {{ .PK.Column }} = $1", []any{v.{{ .PK.Name }}}
-	}
-	if v.dirty == 0 {
-		return "", nil
-	}
-	var sb strings.Builder
-	args := make([]any, 0, bits.OnesCount64(v.dirty)+1)
-	sb.WriteString("UPDATE {{ quote .TableName }} SET ")
-{{- range .UpdateFields }}
-	if v.dirty&dirty{{ $.TypeName }}{{ .MethodName }} != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.{{ .Name }})
-		sb.WriteString("{{ .Column }} = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-{{- end }}
-	args = append(args, v.{{ .PK.Name }})
-	sb.WriteString(" WHERE {{ .PK.Column }} = $")
-	sb.WriteString(strconv.Itoa(len(args)))
-	return sb.String(), args
-}
-
-// FlushDone 实现 dbctx.Flusher，在对应 UPDATE/DELETE 执行成功后回调。
-// UPDATE 同步 orig 快照并清空 dirty；DELETE 把对象置为未加载。
-// rows == 0 说明这一行已经不存在。
-func (v *{{ .TypeName }}) FlushDone(rows int64) error {
-	if rows == 0 {
-		return {{ .ErrorName }}
-	}
-	if v.deleted {
-		v.dirty = 0
-		v.loaded = false
-		v.deleted = false
-		return nil
-	}
-{{- range .UpdateFields }}
-	v.orig{{ .MethodName }} = v.{{ .Name }}
-{{- end }}
-	v.dirty = 0
-	return nil
-}
-
-// Update 是不经过 Transaction 的直接落库入口，
-// 生成代码内部不再调用它，仅供业务代码需要立即写库时使用。
-func (o {{ .ReceiverName }}) Update(
-	ctx context.Context,
-	v *{{ .TypeName }},
-) error {
-	query, args := v.FlushStmt()
-	if query == "" {
-		return nil
-	}
-	tag, err := dbctx.SQLTxFromCtx(ctx).Exec(ctx, query, args...)
-	if err != nil {
-		return fmt.Errorf("{{ .TableName }} update: %w", err)
-	}
-	return v.FlushDone(tag.RowsAffected())
-}
-
-func (o {{ .ReceiverName }}) Insert(
-	ctx context.Context,
-	v *{{ .TypeName }},
-) {
-	dbctx.RegisterNew(ctx, v)
 	tx := dbctx.SQLTxFromCtx(ctx)
-	const query =
-		"INSERT INTO {{ quote .TableName }} " +
-		"({{ range $i, $field := .InsertFields }}{{ if $i }}, {{ end }}{{ $field.Column }}{{ end }}) " +
-		"VALUES ({{ range $i, $field := .InsertFields }}{{ if $i }}, {{ end }}${{ add $i 1 }}{{ end }})"{{ if .AutoIncrement }} +
-		" RETURNING {{ .PK.Column }}"{{ end }}
-{{ if .AutoIncrement }}
-	row := tx.QueryRow(
-		ctx,
-		query,
-{{- range .InsertFields }}
-		v.{{ .Name }},
+	dbctx.GetOrAddCachedRecord(ctx, o) // 主键还是 0：只登记快照，回滚时恢复成插入前的样子
+	const query = "INSERT INTO {{ quote .TableName }} ({{ .InsertColumns }}) VALUES ({{ .InsertValues }}) RETURNING {{ .PK.Column }}"
+	if err := tx.QueryRow(ctx, query,
+{{- range .UpdateFields }}
+		{{ sqlArg . "o." }},
 {{- end }}
-	)
-	if err := row.Scan(
-		&v.{{ .PK.Name }},
-	); err != nil {
+	).Scan(&o.{{ .PK.Name }}); err != nil {
 		panic(err)
 	}
-{{ else }}
-	if _, err := tx.Exec(
-		ctx,
-		query,
-{{- range .InsertFields }}
-		v.{{ .Name }},
-{{- end }}
-	); err != nil {
-		panic(err)
-	}
-{{ end }}
-	v.loaded = true
-{{ range .UpdateFields }}
-	v.orig{{ .MethodName }} = v.{{ .Name }}
-{{ end }}
-	v.dirty = 0
-	dbctx.GetOrAddCachedRecord(ctx, v)
+	o.loaded, o.dirty = true, 0
+	dbctx.GetOrAddCachedRecord(ctx, o) // 主键回填后进身份表
 }
 `

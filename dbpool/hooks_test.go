@@ -13,67 +13,17 @@ import (
 	"pdbgen/ptable"
 )
 
-// fakeTransaction 只用来验证 dbctx.AfterCommit/AfterRollback 是否把任务
-// 挂到了当前事务上，不参与落库。
-type fakeTransaction struct {
-	commitFns   int
-	rollbackFns int
-}
-
-func (f *fakeTransaction) GetCachedRecord(string, int64) (dbctx.Flusher, bool) {
-	return nil, false
-}
-
-func (f *fakeTransaction) AddCachedRecord(obj dbctx.Flusher) dbctx.Flusher { return obj }
-
-func (f *fakeTransaction) RegisterNew(dbctx.Flusher) {}
-
-func (f *fakeTransaction) Rollback() {}
-
-func (f *fakeTransaction) AfterCommit(fn func(context.Context)) { f.commitFns++ }
-
-func (f *fakeTransaction) AfterRollback(fn func(context.Context)) { f.rollbackFns++ }
-
-// TestAfterCommitDelegatesToTransaction 事务在 ctx 里时，钩子应该挂到事务上，
-// 而不是立即执行。
-func TestAfterCommitDelegatesToTransaction(t *testing.T) {
-	txn := &fakeTransaction{}
-	ctx := dbctx.WithTransaction(context.Background(), txn)
-
-	dbctx.AfterCommit(ctx, func(context.Context) {})
-	dbctx.AfterRollback(ctx, func(context.Context) {})
-
-	if txn.commitFns != 1 || txn.rollbackFns != 1 {
-		t.Fatalf("钩子应该挂到事务上，实际 commit=%d rollback=%d", txn.commitFns, txn.rollbackFns)
-	}
-}
-
-// TestRunAfterCommitHooksInOrderAndOnce 钩子按注册顺序执行，且只执行一次。
-func TestRunAfterCommitHooksInOrderAndOnce(t *testing.T) {
-	txn := NewTransaction()
+// TestRunHooksInOrder 钩子按注册顺序执行。
+func TestRunHooksInOrder(t *testing.T) {
+	txn := newTransaction(nil)
 	var order []string
 	txn.AfterCommit(func(context.Context) { order = append(order, "a") })
 	txn.AfterCommit(func(context.Context) { order = append(order, "b") })
 
-	txn.runAfterCommit(context.Background())
-	txn.runAfterCommit(context.Background())
+	runHooks(context.Background(), "after-commit", txn.afterCommit)
 
 	if !reflect.DeepEqual(order, []string{"a", "b"}) {
-		t.Fatalf("钩子应按下注册顺序执行且只执行一次，实际: %v", order)
-	}
-}
-
-// TestRunAfterRollbackHooksInOrder 回滚钩子同样按注册顺序执行。
-func TestRunAfterRollbackHooksInOrder(t *testing.T) {
-	txn := NewTransaction()
-	var order []string
-	txn.AfterRollback(func(context.Context) { order = append(order, "a") })
-	txn.AfterRollback(func(context.Context) { order = append(order, "b") })
-
-	txn.runAfterRollback(context.Background())
-
-	if !reflect.DeepEqual(order, []string{"a", "b"}) {
-		t.Fatalf("回滚钩子应按注册顺序执行，实际: %v", order)
+		t.Fatalf("钩子应按注册顺序执行，实际: %v", order)
 	}
 }
 
@@ -83,12 +33,11 @@ func TestHookPanicDoesNotStopLaterHooks(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
 	defer slog.SetDefault(oldLogger)
 
-	txn := NewTransaction()
 	var secondRan bool
-	txn.AfterCommit(func(context.Context) { panic("boom") })
-	txn.AfterCommit(func(context.Context) { secondRan = true })
-
-	txn.runAfterCommit(context.Background())
+	runHooks(context.Background(), "after-commit", []func(context.Context){
+		func(context.Context) { panic("boom") },
+		func(context.Context) { secondRan = true },
+	})
 
 	if !secondRan {
 		t.Fatal("前一个钩子 panic 后，后续钩子仍应执行")
@@ -152,8 +101,7 @@ func TestAfterCommitRunsAfterCommit(t *testing.T) {
 		dbctx.AfterCommit(ctx, func(hookCtx context.Context) {
 			commitRan = true
 
-			_, hasTxn := dbctx.TransactionFromCtxOptional(hookCtx)
-			hookCtxOK = !dbctx.HasSQLTx(hookCtx) && !hasTxn
+			hookCtxOK = !dbctx.InTransaction(hookCtx)
 			hookGotVal = hookCtx.Value(ctxKey{}) == "request-value"
 
 			n, err := countRedEnvelope(hookCtx, uid)
@@ -307,18 +255,5 @@ func TestAfterCommitHooksRunInRegistrationOrder(t *testing.T) {
 
 	if !reflect.DeepEqual(order, []string{"first", "second"}) {
 		t.Fatalf("钩子应该按注册顺序执行，实际: %v", order)
-	}
-}
-
-// TestHooksOutsideTransactionRunImmediately 没有事务时没有提交点可等，
-// 钩子立即执行。
-func TestHooksOutsideTransactionRunImmediately(t *testing.T) {
-	var commitRan, rollbackRan bool
-
-	dbctx.AfterCommit(t.Context(), func(context.Context) { commitRan = true })
-	dbctx.AfterRollback(t.Context(), func(context.Context) { rollbackRan = true })
-
-	if !commitRan || !rollbackRan {
-		t.Fatalf("没有事务时钩子应该立即执行，实际 commit=%v rollback=%v", commitRan, rollbackRan)
 	}
 }

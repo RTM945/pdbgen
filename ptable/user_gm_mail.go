@@ -4,11 +4,6 @@ package ptable
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"math/bits"
-	"strconv"
-	"strings"
 
 	"pdbgen/dbctx"
 )
@@ -16,6 +11,22 @@ import (
 var UserGmMailTable gMMail
 
 type gMMail struct{}
+
+type GMMail struct {
+	id            int64
+	params        string
+	awardList     string
+	startAt       int64
+	endAt         int64
+	channel       string
+	userCreatedAt int64
+	condition     string
+
+	loaded   bool   // 对应数据库里的一行：查出来的，或者 Insert 过的
+	deleted  bool   // 标记了删除，提交前 flush 成 DELETE
+	detached bool   // 脱离了事务：SetXxx / Delete 会 panic
+	dirty    uint64 // 改过、还没落库的列，第 i 位对应 updateColumnsGMMail[i]
+}
 
 const (
 	dirtyGMMailParams        uint64 = 1 << 0
@@ -27,531 +38,249 @@ const (
 	dirtyGMMailCondition     uint64 = 1 << 6
 )
 
-type GMMail struct {
-	id                int64
-	params            string
-	awardList         string
-	startAt           int64
-	endAt             int64
-	channel           string
-	userCreatedAt     int64
-	condition         string
-	loaded            bool
-	deleted           bool
-	origParams        string
-	origAwardList     string
-	origStartAt       int64
-	origEndAt         int64
-	origChannel       string
-	origUserCreatedAt int64
-	origCondition     string
-	dirty             uint64
+var updateColumnsGMMail = []string{
+	"\"params\"",
+	"\"award_list\"",
+	"\"start_at\"",
+	"\"end_at\"",
+	"\"channel\"",
+	"\"user_created_at\"",
+	"\"condition\"",
 }
 
-type gMMailState struct {
-	id                int64
-	params            string
-	awardList         string
-	startAt           int64
-	endAt             int64
-	channel           string
-	userCreatedAt     int64
-	condition         string
-	loaded            bool
-	deleted           bool
-	origParams        string
-	origAwardList     string
-	origStartAt       int64
-	origEndAt         int64
-	origChannel       string
-	origUserCreatedAt int64
-	origCondition     string
-	dirty             uint64
-}
+const selectColumnsGMMail = "\"id\", \"params\", \"award_list\", \"start_at\", \"end_at\", \"channel\", \"user_created_at\", \"condition\""
 
 func NewGMMail() *GMMail {
 	return &GMMail{}
 }
 
-func loadedGMMail(
-	id int64,
-	params string,
-	awardList string,
-	startAt int64,
-	endAt int64,
-	channel string,
-	userCreatedAt int64,
-	condition string,
-) *GMMail {
-	return &GMMail{
-		id:                id,
-		params:            params,
-		awardList:         awardList,
-		startAt:           startAt,
-		endAt:             endAt,
-		channel:           channel,
-		userCreatedAt:     userCreatedAt,
-		condition:         condition,
-		loaded:            true,
-		origParams:        params,
-		origAwardList:     awardList,
-		origStartAt:       startAt,
-		origEndAt:         endAt,
-		origChannel:       channel,
-		origUserCreatedAt: userCreatedAt,
-		origCondition:     condition,
-	}
-}
-
 func (o *GMMail) Id() int64 {
 	return o.id
-}
-func (o *GMMail) SetParams(v string) {
-	if o.params == v {
-		return
-	}
-	o.params = v
-	o.dirty |= dirtyGMMailParams
 }
 
 func (o *GMMail) Params() string {
 	return o.params
 }
-func (o *GMMail) SetAwardList(v string) {
-	if o.awardList == v {
-		return
+
+func (o *GMMail) SetParams(v string) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.awardList = v
-	o.dirty |= dirtyGMMailAwardList
+	if o.params != v {
+		o.params = v
+		o.dirty |= dirtyGMMailParams
+	}
 }
 
 func (o *GMMail) AwardList() string {
 	return o.awardList
 }
-func (o *GMMail) SetStartAt(v int64) {
-	if o.startAt == v {
-		return
+
+func (o *GMMail) SetAwardList(v string) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.startAt = v
-	o.dirty |= dirtyGMMailStartAt
+	if o.awardList != v {
+		o.awardList = v
+		o.dirty |= dirtyGMMailAwardList
+	}
 }
 
 func (o *GMMail) StartAt() int64 {
 	return o.startAt
 }
-func (o *GMMail) SetEndAt(v int64) {
-	if o.endAt == v {
-		return
+
+func (o *GMMail) SetStartAt(v int64) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.endAt = v
-	o.dirty |= dirtyGMMailEndAt
+	if o.startAt != v {
+		o.startAt = v
+		o.dirty |= dirtyGMMailStartAt
+	}
 }
 
 func (o *GMMail) EndAt() int64 {
 	return o.endAt
 }
-func (o *GMMail) SetChannel(v string) {
-	if o.channel == v {
-		return
+
+func (o *GMMail) SetEndAt(v int64) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.channel = v
-	o.dirty |= dirtyGMMailChannel
+	if o.endAt != v {
+		o.endAt = v
+		o.dirty |= dirtyGMMailEndAt
+	}
 }
 
 func (o *GMMail) Channel() string {
 	return o.channel
 }
-func (o *GMMail) SetUserCreatedAt(v int64) {
-	if o.userCreatedAt == v {
-		return
+
+func (o *GMMail) SetChannel(v string) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.userCreatedAt = v
-	o.dirty |= dirtyGMMailUserCreatedAt
+	if o.channel != v {
+		o.channel = v
+		o.dirty |= dirtyGMMailChannel
+	}
 }
 
 func (o *GMMail) UserCreatedAt() int64 {
 	return o.userCreatedAt
 }
-func (o *GMMail) SetCondition(v string) {
-	if o.condition == v {
-		return
+
+func (o *GMMail) SetUserCreatedAt(v int64) {
+	if o.detached {
+		dbctx.PanicDetached(o)
 	}
-	o.condition = v
-	o.dirty |= dirtyGMMailCondition
+	if o.userCreatedAt != v {
+		o.userCreatedAt = v
+		o.dirty |= dirtyGMMailUserCreatedAt
+	}
 }
 
 func (o *GMMail) Condition() string {
 	return o.condition
 }
 
-func (o *GMMail) ResetToLoaded() {
-	o.params = o.origParams
-	o.awardList = o.origAwardList
-	o.startAt = o.origStartAt
-	o.endAt = o.origEndAt
-	o.channel = o.origChannel
-	o.userCreatedAt = o.origUserCreatedAt
-	o.condition = o.origCondition
-	o.deleted = false
+func (o *GMMail) SetCondition(v string) {
+	if o.detached {
+		dbctx.PanicDetached(o)
+	}
+	if o.condition != v {
+		o.condition = v
+		o.dirty |= dirtyGMMailCondition
+	}
+}
+
+// Delete 标记删除，提交前 flush 成 DELETE；同一事务里之后的查询都看不到这一行。
+func (o *GMMail) Delete() {
+	if o.detached {
+		dbctx.PanicDetached(o)
+	}
+	if o.loaded {
+		o.deleted = true
+	}
+}
+
+// 以下实现 dbctx.Flusher。
+
+func (o *GMMail) TableName() string { return "user_gm_mail" }
+
+func (o *GMMail) Identity() int64 { return o.id }
+
+func (o *GMMail) IsDeleted() bool { return o.deleted }
+
+func (o *GMMail) SnapshotState() dbctx.RecordState { return *o }
+
+func (o *GMMail) RestoreState(s dbctx.RecordState) { *o = s.(GMMail) }
+
+func (o *GMMail) Detach() {
+	if o.loaded {
+		o.detached = true
+	}
+}
+
+func (o *GMMail) DirtyColumns() uint64 {
+	if !o.loaded || o.deleted {
+		return 0
+	}
+	return o.dirty
+}
+
+func (o *GMMail) FlushStmt() (string, []any) {
+	switch {
+	case !o.loaded:
+		return "", nil
+	case o.deleted:
+		return "DELETE FROM \"user_gm_mail\" WHERE \"id\" = $1", []any{o.id}
+	case o.dirty == 0:
+		return "", nil
+	}
+	return dbctx.UpdateStmt("\"user_gm_mail\"", "\"id\"", o.id, updateColumnsGMMail, o.dirty,
+		o.params,
+		o.awardList,
+		o.startAt,
+		o.endAt,
+		o.channel,
+		o.userCreatedAt,
+		o.condition,
+	)
+}
+
+func (o *GMMail) FlushDone() {
+	if o.deleted {
+		o.loaded, o.deleted = false, false
+	}
 	o.dirty = 0
 }
 
-// Delete 把这一行标记为待删除；实际 DELETE 在事务提交前由 flush 统一发出。
-func (v *GMMail) Delete() {
-	if !v.loaded || v.deleted {
-		return
-	}
-	v.deleted = true
-}
-
-// IsDeleted 报告这一行是否在本次事务里被标记删除。
-func (v *GMMail) IsDeleted() bool {
-	return v.deleted
-}
-
-func (v *GMMail) SnapshotState() dbctx.RecordState {
-	return gMMailState{
-		id:                v.id,
-		params:            v.params,
-		awardList:         v.awardList,
-		startAt:           v.startAt,
-		endAt:             v.endAt,
-		channel:           v.channel,
-		userCreatedAt:     v.userCreatedAt,
-		condition:         v.condition,
-		loaded:            v.loaded,
-		deleted:           v.deleted,
-		origParams:        v.origParams,
-		origAwardList:     v.origAwardList,
-		origStartAt:       v.origStartAt,
-		origEndAt:         v.origEndAt,
-		origChannel:       v.origChannel,
-		origUserCreatedAt: v.origUserCreatedAt,
-		origCondition:     v.origCondition,
-		dirty:             v.dirty,
-	}
-}
-
-func (v *GMMail) RestoreState(state dbctx.RecordState) {
-	s := state.(gMMailState)
-	v.id = s.id
-	v.params = s.params
-	v.awardList = s.awardList
-	v.startAt = s.startAt
-	v.endAt = s.endAt
-	v.channel = s.channel
-	v.userCreatedAt = s.userCreatedAt
-	v.condition = s.condition
-	v.loaded = s.loaded
-	v.deleted = s.deleted
-	v.origParams = s.origParams
-	v.origAwardList = s.origAwardList
-	v.origStartAt = s.origStartAt
-	v.origEndAt = s.origEndAt
-	v.origChannel = s.origChannel
-	v.origUserCreatedAt = s.origUserCreatedAt
-	v.origCondition = s.origCondition
-	v.dirty = s.dirty
-}
-
-// ResetNew 把 Insert 回滚后的对象恢复成"未加载"状态。
-func (v *GMMail) ResetNew() {
-	v.id = 0
-	v.loaded = false
-	v.deleted = false
-	v.dirty = 0
-}
-
-// TableName 实现 dbctx.Flusher，和 Identity 一起给出一行的身份，
-// Transaction 用它们把同一行解析到同一个缓存记录
-// （xdb: getCachedTRecord / addCachedTRecord）。
-func (o *GMMail) TableName() string {
-	return "user_gm_mail"
-}
-
-// Identity 实现 dbctx.Flusher。主键自增且还没回填时返回零值，
-// 表示这个对象还没有身份。
-func (o *GMMail) Identity() int64 {
-	return o.id
-}
-
-const selectColumnsGMMail = "\"id\", \"params\", \"award_list\", \"start_at\", \"end_at\", \"channel\", \"user_created_at\", \"condition\""
-
 func scanGMMail(s dbctx.Scanner) (*GMMail, error) {
-	var (
-		id            int64
-		params        string
-		awardList     string
-		startAt       int64
-		endAt         int64
-		channel       string
-		userCreatedAt int64
-		condition     string
-	)
-	if err := s.Scan(
-		&id,
-		&params,
-		&awardList,
-		&startAt,
-		&endAt,
-		&channel,
-		&userCreatedAt,
-		&condition,
-	); err != nil {
+	o := &GMMail{loaded: true}
+	if err := s.Scan(&o.id, &o.params, &o.awardList, &o.startAt, &o.endAt, &o.channel, &o.userCreatedAt, &o.condition); err != nil {
 		return nil, err
 	}
-	return loadedGMMail(
-		id,
-		params,
-		awardList,
-		startAt,
-		endAt,
-		channel,
-		userCreatedAt,
-		condition,
-	), nil
+	return o, nil
 }
 
-func (o gMMail) getId(
-	ctx context.Context,
-	q dbctx.Querier,
-	id int64,
-) *GMMail {
-	const query = "SELECT " + selectColumnsGMMail +
-		" FROM \"user_gm_mail\"" +
-		" WHERE \"id\" = $1"
+func (t gMMail) queryId(ctx context.Context, q dbctx.Querier, id int64) *GMMail {
+	const query = "SELECT " + selectColumnsGMMail + " FROM \"user_gm_mail\" WHERE \"id\" = $1"
 	return dbctx.QueryOne(ctx, q, query, scanGMMail, id)
 }
 
-func (o gMMail) GetById(
-	ctx context.Context,
-	id int64,
-) *GMMail {
-	if v, ok := dbctx.GetCachedRecordAs[*GMMail](ctx, "user_gm_mail", id); ok {
-		if v.IsDeleted() {
-			return nil
-		}
-		return v
+func (t gMMail) GetById(ctx context.Context, id int64) *GMMail {
+	if o, ok := dbctx.GetCachedRecordAs[*GMMail](ctx, "user_gm_mail", id); ok {
+		return o
 	}
-	return o.getId(
-		ctx,
-		dbctx.SQLTxFromCtx(ctx),
-		id,
-	)
+	return t.queryId(ctx, dbctx.SQLTxFromCtx(ctx), id)
 }
 
-func (o gMMail) SelectById(
-	ctx context.Context,
-	id int64,
-) *GMMail {
-	return o.getId(
-		ctx,
-		dbctx.QuerierFromCtx(ctx),
-		id,
-	)
+func (t gMMail) SelectById(ctx context.Context, id int64) *GMMail {
+	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx), id)
 }
 
-// DeleteById 在事务里按主键标记删除；找不到返回 false。
-// 实际 DELETE 在事务提交前由 flush 统一发出，失败时由 memento 恢复。
-func (o gMMail) DeleteById(
-	ctx context.Context,
-	id int64,
-) bool {
-	v := o.GetById(ctx, id)
-	if v == nil {
+// DeleteById 按主键标记删除，提交前 flush 成 DELETE；找不到返回 false。
+func (t gMMail) DeleteById(ctx context.Context, id int64) bool {
+	o := t.GetById(ctx, id)
+	if o == nil {
 		return false
 	}
-	v.Delete()
+	o.Delete()
 	return true
 }
 
-func (o gMMail) getAll(
-	ctx context.Context,
-	q dbctx.Querier,
-) []*GMMail {
-	const query = "SELECT " + selectColumnsGMMail +
-		" FROM \"user_gm_mail\""
-	return dbctx.QueryList(ctx, q, query, scanGMMail)
+const selectAllGMMail = "SELECT " + selectColumnsGMMail + " FROM \"user_gm_mail\""
+
+func (t gMMail) GetAll(ctx context.Context) []*GMMail {
+	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx), selectAllGMMail, scanGMMail)
 }
 
-func (o gMMail) GetAll(
-	ctx context.Context,
-) []*GMMail {
-	return o.getAll(ctx, dbctx.SQLTxFromCtx(ctx))
+func (t gMMail) SelectAll(ctx context.Context) []*GMMail {
+	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx), selectAllGMMail, scanGMMail)
 }
 
-func (o gMMail) SelectAll(
-	ctx context.Context,
-) []*GMMail {
-	return o.getAll(ctx, dbctx.QuerierFromCtx(ctx))
-}
-
-var ErrGMMailNotFound = errors.New(
-	"user_gm_mail: row not found at update time",
-)
-
-// FlushStmt 实现 dbctx.Flusher。dirty == 0 时返回空 query，
-// deleted 时返回 DELETE；Transaction 据此跳过没有变化的行。
-func (v *GMMail) FlushStmt() (string, []any) {
-	if !v.loaded {
-		return "", nil
+// Insert 插入一个 NewGMMail() 创建的新对象，主键由数据库生成并回填。
+func (t gMMail) Insert(ctx context.Context, o *GMMail) {
+	if o.loaded {
+		panic("pdbgen: user_gm_mail: Insert 只接受 NewGMMail() 创建、还没插入过的对象")
 	}
-	if v.deleted {
-		return "DELETE FROM \"user_gm_mail\" WHERE \"id\" = $1", []any{v.id}
-	}
-	if v.dirty == 0 {
-		return "", nil
-	}
-	var sb strings.Builder
-	args := make([]any, 0, bits.OnesCount64(v.dirty)+1)
-	sb.WriteString("UPDATE \"user_gm_mail\" SET ")
-	if v.dirty&dirtyGMMailParams != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.params)
-		sb.WriteString("\"params\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyGMMailAwardList != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.awardList)
-		sb.WriteString("\"award_list\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyGMMailStartAt != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.startAt)
-		sb.WriteString("\"start_at\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyGMMailEndAt != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.endAt)
-		sb.WriteString("\"end_at\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyGMMailChannel != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.channel)
-		sb.WriteString("\"channel\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyGMMailUserCreatedAt != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.userCreatedAt)
-		sb.WriteString("\"user_created_at\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	if v.dirty&dirtyGMMailCondition != 0 {
-		if len(args) > 0 {
-			sb.WriteString(", ")
-		}
-		args = append(args, v.condition)
-		sb.WriteString("\"condition\" = $")
-		sb.WriteString(strconv.Itoa(len(args)))
-	}
-	args = append(args, v.id)
-	sb.WriteString(" WHERE \"id\" = $")
-	sb.WriteString(strconv.Itoa(len(args)))
-	return sb.String(), args
-}
-
-// FlushDone 实现 dbctx.Flusher，在对应 UPDATE/DELETE 执行成功后回调。
-// UPDATE 同步 orig 快照并清空 dirty；DELETE 把对象置为未加载。
-// rows == 0 说明这一行已经不存在。
-func (v *GMMail) FlushDone(rows int64) error {
-	if rows == 0 {
-		return ErrGMMailNotFound
-	}
-	if v.deleted {
-		v.dirty = 0
-		v.loaded = false
-		v.deleted = false
-		return nil
-	}
-	v.origParams = v.params
-	v.origAwardList = v.awardList
-	v.origStartAt = v.startAt
-	v.origEndAt = v.endAt
-	v.origChannel = v.channel
-	v.origUserCreatedAt = v.userCreatedAt
-	v.origCondition = v.condition
-	v.dirty = 0
-	return nil
-}
-
-// Update 是不经过 Transaction 的直接落库入口，
-// 生成代码内部不再调用它，仅供业务代码需要立即写库时使用。
-func (o gMMail) Update(
-	ctx context.Context,
-	v *GMMail,
-) error {
-	query, args := v.FlushStmt()
-	if query == "" {
-		return nil
-	}
-	tag, err := dbctx.SQLTxFromCtx(ctx).Exec(ctx, query, args...)
-	if err != nil {
-		return fmt.Errorf("user_gm_mail update: %w", err)
-	}
-	return v.FlushDone(tag.RowsAffected())
-}
-
-func (o gMMail) Insert(
-	ctx context.Context,
-	v *GMMail,
-) {
-	dbctx.RegisterNew(ctx, v)
 	tx := dbctx.SQLTxFromCtx(ctx)
-	const query = "INSERT INTO \"user_gm_mail\" " +
-		"(\"params\", \"award_list\", \"start_at\", \"end_at\", \"channel\", \"user_created_at\", \"condition\") " +
-		"VALUES ($1, $2, $3, $4, $5, $6, $7)" +
-		" RETURNING \"id\""
-
-	row := tx.QueryRow(
-		ctx,
-		query,
-		v.params,
-		v.awardList,
-		v.startAt,
-		v.endAt,
-		v.channel,
-		v.userCreatedAt,
-		v.condition,
-	)
-	if err := row.Scan(
-		&v.id,
-	); err != nil {
+	dbctx.GetOrAddCachedRecord(ctx, o) // 主键还是 0：只登记快照，回滚时恢复成插入前的样子
+	const query = "INSERT INTO \"user_gm_mail\" (\"params\", \"award_list\", \"start_at\", \"end_at\", \"channel\", \"user_created_at\", \"condition\") VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING \"id\""
+	if err := tx.QueryRow(ctx, query,
+		o.params,
+		o.awardList,
+		o.startAt,
+		o.endAt,
+		o.channel,
+		o.userCreatedAt,
+		o.condition,
+	).Scan(&o.id); err != nil {
 		panic(err)
 	}
-
-	v.loaded = true
-
-	v.origParams = v.params
-
-	v.origAwardList = v.awardList
-
-	v.origStartAt = v.startAt
-
-	v.origEndAt = v.endAt
-
-	v.origChannel = v.channel
-
-	v.origUserCreatedAt = v.userCreatedAt
-
-	v.origCondition = v.condition
-
-	v.dirty = 0
-	dbctx.GetOrAddCachedRecord(ctx, v)
+	o.loaded, o.dirty = true, 0
+	dbctx.GetOrAddCachedRecord(ctx, o) // 主键回填后进身份表
 }

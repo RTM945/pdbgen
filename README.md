@@ -156,9 +156,12 @@ func (this *RedEnvelope) Receive(session *Session) {
 <del>目前只能读写一行，需要多行的代码生成和业务逻辑支持</del>  
 
 <del>对于ResetToLoaded，因为在一次请求中可能涉及到多个表的改变，可能需要在ctx中记log，要回滚时log中的对象按顺序全部回滚</del>  
-已由 Transaction.Rollback（memento）实现：事务失败时恢复所有登记对象的快照。
+已由事务级回滚实现：事务失败时恢复所有登记对象的快照（ResetToLoaded 已删除）。
 
-咨询锁的函数签名是单bigint和两个int，hashtext('user', uid)是用两个int拼起来的，在uid超过int范围时就会出错。预想修改成默认的user锁直接用uid，而其他业务锁用代码生成枚举值。
+<del>咨询锁的函数签名是单bigint和两个int，hashtext('user', uid)是用两个int拼起来的，在uid超过int范围时就会出错。预想修改成默认的user锁直接用uid，而其他业务锁用代码生成枚举值。</del>  
+已由 `TryAdvisoryLock(uid)` / `AdvisoryLock(uid)` 的单 bigint 形式解决。bigint 空间约定只给 uid 用，其他业务锁用 `AdvisoryLock2(ns, id)`。
+
+敏感列（token、密码哈希）在 `variable` 上加 `sensitive="true"`，SQL 日志里只打成 `'***'`。
 
 
 #pg
