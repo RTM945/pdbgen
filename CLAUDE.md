@@ -83,7 +83,7 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL �
 
 - `statement_timeout` / `idle_in_transaction_session_timeout` / `lock_timeout` 拼进 BEGIN（不带参数的 Exec 走简单协议，多条语句一次往返），所有事务都生效。
 - `transactionTimeoutMs` 是客户端预算，同时管 `Procedure` 和 `dbpool.Query` 回调。pgx 在 ctx 到期时只断开连接、不发 CancelRequest，服务端靠 `statement_timeout` 停下；`Query` 没有事务，服务端上限要用角色级 `statement_timeout`。COMMIT 用 `context.WithoutCancel(ctx)`：一旦发出去就必须等到结果，避免"不知道到底提交没有"导致重试重复发放。
-- 锁用 `ProcedureOptions.Lock` 指定：`TryAdvisoryLock(key)` / `TryAdvisoryLock2(ns, id)` 拿不到返回 `ErrAdvisoryLockNotAcquired`；`AdvisoryLock(key)` / `AdvisoryLock2(ns, id)` 会阻塞等待（受 `lock_timeout` 限制）。try 锁失败是正常的"玩家忙"信号，业务直接返回稍后再试，不要在请求内退避重试；框架也不自动重试。key 的语义框架不关心，bigint 形式约定只给 uid 用。
+- 锁用 `ProcedureOptions.Lock` 指定：`TryAdvisoryLock(key)` / `TryAdvisoryLock2(ns, id)` 拿不到返回 `ErrAdvisoryLockNotAcquired`；`AdvisoryLock(key)` / `AdvisoryLock2(ns, id)` 会阻塞等待（受 `lock_timeout` 限制，等超时同样返回 `ErrAdvisoryLockNotAcquired`）。try 锁失败是正常的"玩家忙"信号，业务直接返回稍后再试，不要在请求内退避重试；框架也不自动重试。key 的语义框架不关心，bigint 形式约定只给 uid 用。
 - 这套锁是用来替代 `SELECT ... FOR UPDATE` 做玩家级串行的（README 有说明：玩家请求用 try 版，GM/RPC 写请求用阻塞版，只读请求走非事务的 `Query`）。
 - 连接池是包级变量，`Init` 每进程调一次；`Close` 必须排在服务优雅关闭**之后**，否则会把在途请求打死在半路。`DefaultQueryExecMode` 是 `pgx.QueryExecModeExec`（extended protocol、不缓存 prepared statement），配合 pgBouncer 的 transaction pooling。
 

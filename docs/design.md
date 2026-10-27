@@ -132,7 +132,7 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 ```
 
 - `Timeout` 与 `transactionTimeoutMs` 同时生效时取更早到期的那个；COMMIT 仍然用 `WithoutCancel`，不受这个预算影响。
-- **不自动重试**：try 锁拿不到返回 `ErrAdvisoryLockNotAcquired`，由业务返回"稍后再试"或在上层重试；框架不在请求里空转。blocking 锁由 `lock_timeout` 限制等待。`fn` 只执行一次。
+- **不自动重试**：try 锁拿不到返回 `ErrAdvisoryLockNotAcquired`，由业务返回"稍后再试"或在上层重试；框架不在请求里空转。blocking 锁由 `lock_timeout` 限制等待，等超时同样返回 `ErrAdvisoryLockNotAcquired`——调用方只需要认这一个"忙"信号。`fn` 只执行一次。
 - **不能嵌套**：ctx 里已经有事务时返回 `ErrNestedTransaction`。嵌套事务会从池里另拿一条连接：同一把锁自己等自己，同一行在两个事务里各有一个对象互相覆盖，并发高时连接池互等。
 
 ### 3.2 提交后 / 回滚后任务
@@ -193,6 +193,7 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 
 - **改了什么**：
   - 超时：三个 `SET LOCAL` 拼进 BEGIN，所有事务生效（之前只有加锁的事务才下发）；`transactionTimeoutMs` 同时作为 `dbpool.Query` 回调的预算。
+  - 锁：阻塞锁等到 `lock_timeout` 也返回 `ErrAdvisoryLockNotAcquired`（之前是一个原样的 PgError 55P03），和 try 锁拿不到是同一个"忙"信号。
   - 约束：嵌套 `Procedure` 返回 `ErrNestedTransaction`；事务外查出来的实体、事务结束后的实体脱离事务，`SetXxx` / `Delete` panic；改了查询条件列之后再按这些列查同一张表 panic（`dbctx.CheckPredicate`）；`dbctx.AfterCommit` / `AfterRollback` 只能在事务里调用（之前事务外立即执行）；`Insert` 拒绝已经插入过的对象；`pgx.ErrTxCommitRollback` 按回滚处理。
   - 生成器：只接受 int64 自增主键、合法且不冲突的列名、受支持的类型，索引不能重复，一个 bean 只映射一张表；`sensitive="true"` 的列在 SQL 日志里打成 `'***'`。
   - SQL 日志：不再把 SQL 当 `Sprintf` 格式串（`LIKE 'a%'`、取模不再乱码）；`nil` 打成 `NULL`；查不到记 INFO 而不是 ERROR。

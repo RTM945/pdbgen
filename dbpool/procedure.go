@@ -3,9 +3,11 @@ package dbpool
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"pdbgen/dbctx"
 )
@@ -20,7 +22,7 @@ type LockSpec struct {
 // TryAdvisoryLock 单 bigint 的 try 锁，拿不到返回 ErrAdvisoryLockNotAcquired。
 func TryAdvisoryLock(key int64) LockSpec { return LockSpec{try: true, args: []any{key}} }
 
-// AdvisoryLock 单 bigint 的阻塞锁，等待时间受 lock_timeout 限制。
+// AdvisoryLock 单 bigint 的阻塞锁，等待时间受 lock_timeout 限制；等超时也返回 ErrAdvisoryLockNotAcquired。
 func AdvisoryLock(key int64) LockSpec { return LockSpec{args: []any{key}} }
 
 // TryAdvisoryLock2 双 int32 的 try 锁。
@@ -43,6 +45,10 @@ func (l LockSpec) acquire(ctx context.Context, tx dbctx.SQLTx) error {
 	}
 	if !l.try {
 		_, err := tx.Exec(ctx, query, l.args...)
+		if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && pgErr.Code == "55P03" {
+			// 等到 lock_timeout 还没拿到：和 try 锁拿不到是同一个"忙"信号
+			return fmt.Errorf("%w: %w", ErrAdvisoryLockNotAcquired, err)
+		}
 		return err
 	}
 	var locked bool

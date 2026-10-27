@@ -78,3 +78,38 @@ func TestProcedureAppliesTimeout(t *testing.T) {
 		t.Fatal("ProcedureOptions.Timeout 应该体现在 ctx 的 deadline 上")
 	}
 }
+
+// TestBlockingLockTimeoutIsNotAcquired 阻塞锁等到 lock_timeout 还没拿到，返回的和 try 锁一样是
+// ErrAdvisoryLockNotAcquired——调用方只需要认一个"忙"信号。
+func TestBlockingLockTimeoutIsNotAcquired(t *testing.T) {
+	setupTestDB(t)
+
+	old := beginSQL
+	beginSQL = buildBeginSQL(0, 0, 100)
+	t.Cleanup(func() { beginSQL = old })
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	key := time.Now().UnixNano()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock(key)}, func(context.Context) error {
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	<-started
+
+	err := Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock(key)}, func(context.Context) error { return nil })
+	close(release)
+	if !errors.Is(err, ErrAdvisoryLockNotAcquired) {
+		t.Fatalf("阻塞锁等超时应该返回 ErrAdvisoryLockNotAcquired，实际: %v", err)
+	}
+	if err := <-firstDone; err != nil {
+		t.Fatalf("第一个 Procedure 失败: %v", err)
+	}
+}
