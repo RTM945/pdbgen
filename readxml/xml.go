@@ -46,9 +46,6 @@ type Bean struct {
 type Variable struct {
 	Name string `xml:"name,attr"`
 	Type string `xml:"type,attr"`
-
-	// Sensitive 标记敏感列（token、密码哈希等）：SQL 日志里它的参数只打成 '***'。
-	Sensitive bool `xml:"sensitive,attr"`
 }
 
 type Table struct {

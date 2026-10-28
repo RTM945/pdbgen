@@ -153,7 +153,7 @@ func (o *User) FlushStmt() (string, []any) {
 		o.name,
 		o.lastLoginAt,
 		o.createdAt,
-		dbctx.Secret(o.token),
+		o.token,
 	)
 }
 
@@ -220,7 +220,7 @@ func (t user) Insert(ctx context.Context, o *User) {
 		o.name,
 		o.lastLoginAt,
 		o.createdAt,
-		dbctx.Secret(o.token),
+		o.token,
 	).Scan(&o.id); err != nil {
 		panic(err)
 	}

@@ -162,8 +162,6 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 | `Insert()` | `INSERT ... RETURNING <pk>`，只接受还没插入过的新对象 |
 | `TableName()` / `Identity()` / `FlushStmt()` / `FlushDone()` / `DirtyColumns()` / `SnapshotState()` / `RestoreState()` / `Detach()` | 实现 `dbctx.Flusher`，供运行时使用 |
 
-`pdb.xml` 里 `sensitive="true"` 的 string 列，作为 SQL 参数时包成 `dbctx.Secret`：数据库收到原值，SQL 日志里只打成 `'***'`。
-
 改 `unique` 会改变生成的 API 形态（单行 ↔ 列表）。列表查询返回的元素在事务内都会登记进身份表；再对同一行单独 `GetById` 会返回列表里的同一个指针，不会产生第二个对象。
 
 删除是延迟的：`Delete()` / `DeleteById` 只标记，提交前由 flush 统一发 `DELETE`；同一个事务内 `GetById` / 唯一索引 / 列表查询都会过滤掉已删除的记录；事务回滚时对象恢复成未删除状态。
@@ -173,7 +171,7 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 - 主键必须是 `int64` 且 `autoIncrement="true"`（身份表、`Insert` 回填、`GetById` 缓存都按它实现）；
 - 除主键外至少一列，最多 64 列（`dirty` 是 `uint64` 位掩码）；
 - 列名是小写字母开头的 Go 标识符，不能是 Go 关键字（`type` 换成 `typ` / `kind`），不能和生成代码的内部名字冲突（`loaded`、`deleted`、`detached`、`dirty`、`t`、`o`、`q`、`ctx`、`query`，以及 `tableName`、`delete` 这类和实体方法同名的列）；
-- 类型只能是 `int64` / `int32` / `int16` / `int8` / `string` / `bool` / `float32` / `float64`；`sensitive` 只能标在非主键的 string 列上；
+- 类型只能是 `int64` / `int32` / `int16` / `int8` / `string` / `bool` / `float32` / `float64`；
 - 同一组列只能有一个索引，也不能和主键相同；一个 bean 只能映射一张表。
 
 ## 5. 已知缺口
@@ -188,6 +186,13 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 - **Procedure 与 Transaction 的职责划分与命名**：[design-procedure-transaction.md](design-procedure-transaction.md)（提案，Phase 1-5 已实施）。实施时并入本文正文，并在变更记录里留痕。
 
 ## 7. 变更记录
+
+### 2026-10-28 去掉 sensitive 列
+
+- **改了什么**：删掉 `pdb.xml` 的 `sensitive` 属性（`readxml.Variable.Sensitive`）、生成器的 `sqlArg` / `SQLArgs` 和相关校验、`dbctx.Secret`，以及 SQL 日志里 `'***'` 的分支；生成代码直接传字段值。
+- **为什么**：使用方不需要在 SQL 日志里隐去列值，这套机制只增加了复杂度。
+- **影响范围**：SQL 日志里原来打成 `'***'` 的列现在打出原值；`pdb.xml` 里残留的 `sensitive` 属性会被 XML 解析忽略，不报错。传给数据库的值和运行时语义不变。
+- **验证状态**：`go build/vet/test` 通过；重新生成了本仓库的 `ptable` 和 go_pg_test 的 `ptable`。
 
 ### 2026-10-28 约定改成约束；精简运行时和生成代码
 

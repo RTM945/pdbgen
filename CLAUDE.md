@@ -49,7 +49,6 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL �
 
 - 复合索引用逗号分隔写在 `index` 的 `variable` 上（`uid,actId`）。**unique 索引生成单行查询 `GetByXxx`/`SelectByXxx`，非 unique 索引生成列表查询 `ListByXxx`/`SelectListByXxx`**，主键固定是 `GetById`/`SelectById`。改 `unique` 会改变生成的 API 形态。
 - 主键必须是 `int64` 且 `autoIncrement="true"`：不出现在 INSERT 的字段列表里，靠 `RETURNING id` 回填，也不参与 UPDATE。`primaryKey` 的 `start` / `step` 生成 `START WITH` / `INCREMENT BY`；只影响 identity 首次创建，已存在的 identity 不会被自动修改。
-- `variable` 上的 `sensitive="true"`（只能是非主键的 string 列）让生成代码把参数包成 `dbctx.Secret`，SQL 日志里只打成 `'***'`。
 - `ptable/` 下的 `<表名>.go` 全部是生成产物，不要手改；改结构要改 `pdb.xml`、必要时改模板，然后重新生成并提交。`ptable/delete_test.go` 是手写测试。
 
 ## 运行时架构
@@ -89,7 +88,7 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL �
 
 ### SQL 日志（[dbpool/logger.go](dbpool/logger.go)）
 
-`showSQL="true"` 时用 `loggingSQLTx` 包一层，每条语句记一条 message 为 `sql` 的日志（成功 Info / 失败 Error，查不到不算失败），flush 的 Batch 合并成一条 `sql batch`；`$1` 占位符会被替换成真实字面量（`nil` 是 `NULL`，`dbctx.Secret` 是 `'***'`），方便直接粘到 psql。`QueryRow` 拖到 `Scan` 时才记，因为错误要到 `Scan` 才拿得到。日志落点用 `SetLogger` 换，不设就用调用时的 `slog.Default()`。
+`showSQL="true"` 时用 `loggingSQLTx` 包一层，每条语句记一条 message 为 `sql` 的日志（成功 Info / 失败 Error，查不到不算失败），flush 的 Batch 合并成一条 `sql batch`；`$1` 占位符会被替换成真实字面量（`nil` 是 `NULL`），方便直接粘到 psql。`QueryRow` 拖到 `Scan` 时才记，因为错误要到 `Scan` 才拿得到。日志落点用 `SetLogger` 换，不设就用调用时的 `slog.Default()`。
 
 ## 已知缺口
 

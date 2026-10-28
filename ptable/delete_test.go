@@ -4,8 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-
-	"pdbgen/dbctx"
 )
 
 // 这个文件是手写测试，不是生成产物；用生成的 RedEnvelope / User 验证实体的状态机，
@@ -122,16 +120,4 @@ func TestInsertRejectsLoadedRecord(t *testing.T) {
 	mustPanic(t, "Insert 只接受 NewRedEnvelope()", func() {
 		UserRedEnvelopeTable.Insert(context.Background(), loadedRedEnvelope())
 	})
-}
-
-// TestSensitiveColumnIsSecret sensitive 列作为 SQL 参数时包成 dbctx.Secret。
-func TestSensitiveColumnIsSecret(t *testing.T) {
-	u := &User{id: 1, name: "n", token: "old", loaded: true}
-	u.SetToken("new")
-	u.SetName("m")
-
-	_, args := u.FlushStmt()
-	if len(args) != 3 || args[0] != "m" || args[1] != dbctx.Secret("new") {
-		t.Fatalf("token 应该以 dbctx.Secret 传参，name 原样传参，实际 %#v", args)
-	}
 }

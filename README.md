@@ -161,7 +161,6 @@ func (this *RedEnvelope) Receive(session *Session) {
 <del>咨询锁的函数签名是单bigint和两个int，hashtext('user', uid)是用两个int拼起来的，在uid超过int范围时就会出错。预想修改成默认的user锁直接用uid，而其他业务锁用代码生成枚举值。</del>  
 已由 `TryAdvisoryLock(uid)` / `AdvisoryLock(uid)` 的单 bigint 形式解决。bigint 空间约定只给 uid 用，其他业务锁用 `AdvisoryLock2(ns, id)`。
 
-敏感列（token、密码哈希）在 `variable` 上加 `sensitive="true"`，SQL 日志里只打成 `'***'`。
 
 
 #pg

@@ -31,7 +31,7 @@
         <variable name="name" type="string"/>
         <variable name="lastLoginAt" type="int64"/>
         <variable name="createdAt" type="int64"/>
-        <variable name="token" type="string" sensitive="true"/> SQL 日志里只打成 '***'
+        <variable name="token" type="string"/>
     </bean>
     <table name="user" bean="user">
         <!-- start/step 生成 START WITH / INCREMENT BY；step 省略或 1 表示默认步长 -->

@@ -116,13 +116,11 @@ func formatSQL(sql string, args []any) string {
 	return sql
 }
 
-// sqlLiteral 把参数写成 SQL 字面量；dbctx.Secret（敏感列）只打成 '***'。
+// sqlLiteral 把参数写成 SQL 字面量。
 func sqlLiteral(v any) string {
 	switch x := v.(type) {
 	case nil:
 		return "NULL"
-	case dbctx.Secret:
-		return "'***'"
 	case string:
 		return "'" + strings.ReplaceAll(x, "'", "''") + "'"
 	default:

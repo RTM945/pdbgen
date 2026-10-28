@@ -238,10 +238,6 @@ func PanicDetached(rec Flusher) {
 	))
 }
 
-// Secret 包装敏感列的参数值：pgx 按底层 string 编码，SQL 日志里只打成 '***'。
-// pdb.xml 里 sensitive="true" 的列由生成代码自动包装。
-type Secret string
-
 // UpdateStmt 拼只含脏列的 UPDATE，供生成代码的 FlushStmt 使用。
 // columns[i] / values[i] 是第 i 个可更新列（已加引号），dirty 的第 i 位表示它改过；主键是最后一个参数。
 func UpdateStmt(table, pkColumn string, pk int64, columns []string, dirty uint64, values ...any) (string, []any) {

@@ -57,7 +57,6 @@ type field struct {
 	Column       string // 已加引号、已转义成 Go 字符串内容的列名：\"act_id\"
 	GoType       string
 	IsPrimaryKey bool
-	Sensitive    bool
 }
 
 // queryMethod 是按主键或索引生成的一组查询方法。
@@ -65,7 +64,6 @@ type queryMethod struct {
 	Name         string // GetBy<Name> / ListBy<Name>
 	Params       string // uid int64, actId int32
 	Args         string // uid, actId
-	SQLArgs      string // 传给 SQL 的参数，sensitive 列包成 dbctx.Secret
 	Where        string
 	Columns      string // 条件里可更新列的 dirty 位，给 CheckPredicate；只有主键时为空
 	IsList       bool
@@ -91,8 +89,7 @@ type tableGen struct {
 }
 
 var tpl = template.Must(template.New("table").Funcs(template.FuncMap{
-	"quote":  quoteIdent,
-	"sqlArg": sqlArg,
+	"quote": quoteIdent,
 }).Parse(sourceTemplate))
 
 func generateTable(schema *readxml.Schema, table readxml.Table) ([]byte, error) {
@@ -116,14 +113,6 @@ func generateTable(schema *readxml.Schema, table readxml.Table) ([]byte, error) 
 func quoteIdent(s string) string {
 	q := strconv.Quote(`"` + strings.ReplaceAll(s, `"`, `""`) + `"`)
 	return q[1 : len(q)-1]
-}
-
-// sqlArg 返回把字段值作为 SQL 参数传出去的表达式，sensitive 列包成 dbctx.Secret。
-func sqlArg(f field, prefix string) string {
-	if f.Sensitive {
-		return "dbctx.Secret(" + prefix + f.Name + ")"
-	}
-	return prefix + f.Name
 }
 
 // supportedTypes 与 gen/ddl 的类型映射一致。
@@ -154,8 +143,6 @@ func checkVariable(table string, v readxml.Variable) error {
 		return fmt.Errorf("table %q: 列名 %q 和生成代码的内部名字冲突，换个名字", table, v.Name)
 	case !supportedTypes[v.Type]:
 		return fmt.Errorf("table %q: 列 %q 的类型 %q 不支持", table, v.Name, v.Type)
-	case v.Sensitive && v.Type != "string":
-		return fmt.Errorf("table %q: 列 %q 不是 string，不能标记 sensitive", table, v.Name)
 	}
 	return nil
 }
@@ -207,7 +194,6 @@ func buildTableGen(schema *readxml.Schema, table readxml.Table) (tableGen, error
 			Column:       quoteIdent(readxml.SnakeCase(v.Name)),
 			GoType:       v.Type,
 			IsPrimaryKey: v.Name == pk.Variable,
-			Sensitive:    v.Sensitive,
 		}
 		fields[v.Name] = f
 		gen.Fields = append(gen.Fields, f)
@@ -224,8 +210,6 @@ func buildTableGen(schema *readxml.Schema, table readxml.Table) (tableGen, error
 		return gen, fmt.Errorf("table %q: 主键 %q 不在 bean 里", table.Name, pk.Variable)
 	case gen.PK.GoType != "int64" || !pk.AutoIncrement:
 		return gen, fmt.Errorf("table %q: 主键 %q 必须是 int64 且 autoIncrement=\"true\"", table.Name, pk.Variable)
-	case gen.PK.Sensitive:
-		return gen, fmt.Errorf("table %q: 主键 %q 不能标记 sensitive", table.Name, pk.Variable)
 	case len(gen.UpdateFields) == 0:
 		return gen, fmt.Errorf("table %q: 除主键外至少要有一列", table.Name)
 	case len(gen.UpdateFields) > 64:
@@ -286,12 +270,11 @@ func buildTableGen(schema *readxml.Schema, table readxml.Table) (tableGen, error
 }
 
 func (gen *tableGen) newQuery(fields []field, unique bool) queryMethod {
-	var name, params, args, sqlArgs, where, columns []string
+	var name, params, args, where, columns []string
 	for i, f := range fields {
 		name = append(name, f.MethodName)
 		params = append(params, f.Name+" "+f.GoType)
 		args = append(args, f.Name)
-		sqlArgs = append(sqlArgs, sqlArg(f, ""))
 		where = append(where, f.Column+" = $"+strconv.Itoa(i+1))
 		if !f.IsPrimaryKey {
 			columns = append(columns, "dirty"+gen.TypeName+f.MethodName)
@@ -301,7 +284,6 @@ func (gen *tableGen) newQuery(fields []field, unique bool) queryMethod {
 		Name:    strings.Join(name, ""),
 		Params:  strings.Join(params, ", "),
 		Args:    strings.Join(args, ", "),
-		SQLArgs: strings.Join(sqlArgs, ", "),
 		Where:   strings.Join(where, " AND "),
 		Columns: strings.Join(columns, " | "),
 		IsList:  !unique,

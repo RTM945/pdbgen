@@ -107,7 +107,7 @@ func (o *{{ .TypeName }}) FlushStmt() (string, []any) {
 	}
 	return dbctx.UpdateStmt("{{ quote .TableName }}", "{{ .PK.Column }}", o.{{ .PK.Name }}, updateColumns{{ .TypeName }}, o.dirty,
 {{- range .UpdateFields }}
-		{{ sqlArg . "o." }},
+		o.{{ .Name }},
 {{- end }}
 	)
 }
@@ -132,7 +132,7 @@ func (t {{ $.ReceiverName }}) query{{ .Name }}(ctx context.Context, q dbctx.Quer
 	dbctx.CheckPredicate(ctx, "{{ $.TableName }}", {{ .Columns }})
 {{- end }}
 	const query = "SELECT " + selectColumns{{ $.TypeName }} + " FROM {{ quote $.TableName }} WHERE {{ .Where }}"
-	return dbctx.Query{{ if .IsList }}List{{ else }}One{{ end }}(ctx, q, query, scan{{ $.TypeName }}, {{ .SQLArgs }})
+	return dbctx.Query{{ if .IsList }}List{{ else }}One{{ end }}(ctx, q, query, scan{{ $.TypeName }}, {{ .Args }})
 }
 {{ if .IsList }}
 func (t {{ $.ReceiverName }}) ListBy{{ .Name }}(ctx context.Context, {{ .Params }}) []*{{ $.TypeName }} {
@@ -187,7 +187,7 @@ func (t {{ .ReceiverName }}) Insert(ctx context.Context, o *{{ .TypeName }}) {
 	const query = "INSERT INTO {{ quote .TableName }} ({{ .InsertColumns }}) VALUES ({{ .InsertValues }}) RETURNING {{ .PK.Column }}"
 	if err := tx.QueryRow(ctx, query,
 {{- range .UpdateFields }}
-		{{ sqlArg . "o." }},
+		o.{{ .Name }},
 {{- end }}
 	).Scan(&o.{{ .PK.Name }}); err != nil {
 		panic(err)

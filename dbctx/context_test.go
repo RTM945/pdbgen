@@ -177,11 +177,11 @@ func TestQuerierFromCtx(t *testing.T) {
 
 // TestUpdateStmt 只拼脏列，主键是最后一个参数。
 func TestUpdateStmt(t *testing.T) {
-	stmt, args := UpdateStmt(`"t"`, `"id"`, 7, []string{`"a"`, `"b"`, `"c"`}, 1<<0|1<<2, "x", 2, Secret("s"))
+	stmt, args := UpdateStmt(`"t"`, `"id"`, 7, []string{`"a"`, `"b"`, `"c"`}, 1<<0|1<<2, "x", 2, "s")
 	if want := `UPDATE "t" SET "a" = $1, "c" = $2 WHERE "id" = $3`; stmt != want {
 		t.Fatalf("语句不符\n期望 %s\n实际 %s", want, stmt)
 	}
-	if len(args) != 3 || args[0] != "x" || args[1] != Secret("s") || args[2] != int64(7) {
+	if len(args) != 3 || args[0] != "x" || args[1] != "s" || args[2] != int64(7) {
 		t.Fatalf("参数不符，实际 %#v", args)
 	}
 }

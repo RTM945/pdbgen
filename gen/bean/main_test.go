@@ -54,22 +54,6 @@ func TestGenerateTableSupportsBoolAndFloats(t *testing.T) {
 	)
 }
 
-// TestGenerateTableWrapsSensitiveColumns sensitive 列在 UPDATE、INSERT 和查询参数里都包成 dbctx.Secret。
-func TestGenerateTableWrapsSensitiveColumns(t *testing.T) {
-	src := generate(t, probeSchema([]readxml.Variable{
-		{Name: "name", Type: "string"},
-		{Name: "token", Type: "string", Sensitive: true},
-	}, readxml.Index{Variable: "token", Unique: true}))
-
-	if n := strings.Count(src, "dbctx.Secret(o.token)"); n != 2 {
-		t.Fatalf("FlushStmt 和 Insert 都应该包 dbctx.Secret(o.token)，实际 %d 处:\n%s", n, src)
-	}
-	mustContain(t, src, "scanProbe, dbctx.Secret(token))")
-	if strings.Contains(src, "dbctx.Secret(o.name)") {
-		t.Fatal("非 sensitive 列不应包 dbctx.Secret")
-	}
-}
-
 // TestGenerateTableGuardsPredicateColumns 索引查询前检查条件列，按主键查不检查。
 func TestGenerateTableGuardsPredicateColumns(t *testing.T) {
 	src := generate(t, probeSchema([]readxml.Variable{
@@ -108,7 +92,6 @@ func TestBuildTableGenRejects(t *testing.T) {
 		{"查询方法的参数名", probeSchema([]readxml.Variable{{Name: "ctx", Type: "string"}}), "内部名字冲突"},
 		{"大写开头", probeSchema([]readxml.Variable{{Name: "Name", Type: "string"}}), "小写字母开头"},
 		{"不支持的类型", probeSchema([]readxml.Variable{{Name: "at", Type: "time.Time"}}), "不支持"},
-		{"非 string 的 sensitive", probeSchema([]readxml.Variable{{Name: "pin", Type: "int64", Sensitive: true}}), "不能标记 sensitive"},
 		{"重复索引", probeSchema([]readxml.Variable{str},
 			readxml.Index{Variable: "name"}, readxml.Index{Variable: "name", Unique: true}), "重复"},
 		{"和主键相同的索引", probeSchema([]readxml.Variable{str}, readxml.Index{Variable: "id", Unique: true}), "重复"},
