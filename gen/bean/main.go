@@ -61,8 +61,9 @@ type field struct {
 
 // queryMethod 是按主键或索引生成的一组查询方法。
 type queryMethod struct {
-	Name         string // GetBy<Name> / ListBy<Name>
-	Params       string // uid int64, actId int32
+	Suffix       string // 方法名去掉 Get / Select / List / SelectList：普通索引是 By<列名>，部分索引是 method
+	Func         string // 内部查询函数名：普通索引 query<列名>，部分索引 queryWhere<method>
+	Params       string // uid int64, actId int32；没有 variable 的部分索引为空
 	Args         string // uid, actId
 	Where        string
 	Columns      string // 条件里可更新列的 dirty 位，给 CheckPredicate；只有主键时为空
@@ -229,17 +230,36 @@ func buildTableGen(schema *readxml.Schema, table readxml.Table) (tableGen, error
 	gen.InsertValues = strings.Join(insertValues, ", ")
 
 	// 查询方法：主键固定生成 GetById / SelectById；unique 索引生成 GetByXxx / SelectByXxx，
-	// 非 unique 索引生成 ListByXxx / SelectListByXxx。同一组列只能有一个查询。
-	pkQuery := gen.newQuery([]field{gen.PK}, true)
+	// 非 unique 索引生成 ListByXxx / SelectListByXxx；部分索引（有 where）按 method 命名：Get<method> / List<method>。
+	// 同一组列加同样的条件只能有一个查询。
+	pkQuery := gen.newQuery([]field{gen.PK}, nil, true, "")
 	pkQuery.IsPrimaryKey = true
 	gen.QueryMethods = append(gen.QueryMethods, pkQuery)
 	seen := map[string]bool{pk.Variable: true}
-	names := map[string]bool{pkQuery.Name: true}
+	names := map[string]bool{pkQuery.Suffix: true}
+	funcs := map[string]bool{pkQuery.Func: true}
 	for _, index := range table.Indexes {
 		vars := readxml.SplitTrimSpace(index.Variable)
-		key := strings.Join(vars, ",")
-		if len(vars) == 0 {
+		var conds []readxml.Condition
+		switch {
+		case index.Where != "":
+			if conds, err = readxml.ParseWhere(bean, pk.Variable, index.Where); err != nil {
+				return gen, fmt.Errorf("table %q: %w", table.Name, err)
+			}
+			if !token.IsIdentifier(index.Method) || !token.IsExported(index.Method) {
+				return gen, fmt.Errorf("table %q: 部分索引（where=%q）要用 method 指定方法名，大写字母开头的 Go 标识符", table.Name, index.Where)
+			}
+			if len(vars) == 0 && index.Unique {
+				return gen, fmt.Errorf("table %q: 部分索引 %s 没有 variable，不能 unique", table.Name, index.Method)
+			}
+		case index.Method != "":
+			return gen, fmt.Errorf("table %q: method=%q 只用于部分索引，要配 where", table.Name, index.Method)
+		case len(vars) == 0:
 			return gen, fmt.Errorf("table %q has empty index", table.Name)
+		}
+		key := strings.Join(vars, ",")
+		if conds != nil {
+			key += " WHERE " + readxml.WhereSQL(conds, func(s string) string { return s })
 		}
 		if seen[key] {
 			return gen, fmt.Errorf("table %q: 索引 (%s) 和主键或另一个索引重复", table.Name, key)
@@ -259,17 +279,19 @@ func buildTableGen(schema *readxml.Schema, table readxml.Table) (tableGen, error
 			used[name] = true
 			indexFields = append(indexFields, f)
 		}
-		q := gen.newQuery(indexFields, index.Unique)
-		if names[q.Name] {
-			return gen, fmt.Errorf("table %q: 索引 (%s) 生成的方法名 %s 和别的查询重复", table.Name, key, q.Name)
+		q := gen.newQuery(indexFields, conds, index.Unique, index.Method)
+		if names[q.Suffix] || funcs[q.Func] {
+			return gen, fmt.Errorf("table %q: 索引 (%s) 生成的方法名 %s 和别的查询重复", table.Name, key, q.Suffix)
 		}
-		names[q.Name] = true
+		names[q.Suffix], funcs[q.Func] = true, true
 		gen.QueryMethods = append(gen.QueryMethods, q)
 	}
 	return gen, nil
 }
 
-func (gen *tableGen) newQuery(fields []field, unique bool) queryMethod {
+// newQuery 生成一组查询。conds 是部分索引的条件：常量直接写进 SQL（不用 $n 参数），规划器才能确定查询能用部分索引；
+// 条件列也进 CheckPredicate，改了还没落库就按条件查，查到的是旧数据。
+func (gen *tableGen) newQuery(fields []field, conds []readxml.Condition, unique bool, method string) queryMethod {
 	var name, params, args, where, columns []string
 	for i, f := range fields {
 		name = append(name, f.MethodName)
@@ -280,12 +302,21 @@ func (gen *tableGen) newQuery(fields []field, unique bool) queryMethod {
 			columns = append(columns, "dirty"+gen.TypeName+f.MethodName)
 		}
 	}
-	return queryMethod{
-		Name:    strings.Join(name, ""),
-		Params:  strings.Join(params, ", "),
-		Args:    strings.Join(args, ", "),
-		Where:   strings.Join(where, " AND "),
-		Columns: strings.Join(columns, " | "),
-		IsList:  !unique,
+	q := queryMethod{
+		Suffix: "By" + strings.Join(name, ""),
+		Func:   "query" + strings.Join(name, ""),
+		Params: strings.Join(params, ", "),
+		Args:   strings.Join(args, ", "),
+		IsList: !unique,
 	}
+	if conds != nil {
+		q.Suffix, q.Func = method, "queryWhere"+method
+		where = append(where, readxml.WhereSQL(conds, quoteIdent))
+		for _, c := range conds {
+			columns = append(columns, "dirty"+gen.TypeName+readxml.PascalCase(c.Variable))
+		}
+	}
+	q.Where = strings.Join(where, " AND ")
+	q.Columns = strings.Join(columns, " | ")
+	return q
 }

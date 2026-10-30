@@ -34,6 +34,7 @@ type DBIndex struct {
 	Name    string
 	Unique  bool
 	Columns []string
+	Where   string // 部分索引的条件，pg_get_expr 反解出来的；普通索引为空
 }
 
 func main() {
@@ -282,7 +283,8 @@ SELECT
 	t.relname AS table_name,
 	i.relname AS index_name,
 	x.indisunique,
-	array_agg(a.attname ORDER BY k.ord)
+	array_agg(a.attname ORDER BY k.ord),
+	COALESCE(pg_get_expr(x.indpred, x.indrelid), '')
 FROM pg_class t
 JOIN pg_namespace n
 	ON n.oid = t.relnamespace
@@ -302,7 +304,8 @@ WHERE n.nspname = $1
 GROUP BY
 	t.relname,
 	i.relname,
-	x.indisunique
+	x.indisunique,
+	COALESCE(pg_get_expr(x.indpred, x.indrelid), '')
 `,
 		schemaName,
 	)
@@ -316,6 +319,7 @@ GROUP BY
 			indexName string
 			unique    bool
 			columns   []string
+			where     string
 		)
 
 		if err := rows.Scan(
@@ -323,6 +327,7 @@ GROUP BY
 			&indexName,
 			&unique,
 			&columns,
+			&where,
 		); err != nil {
 			rows.Close()
 			return nil, err
@@ -337,6 +342,7 @@ GROUP BY
 			Name:    indexName,
 			Unique:  unique,
 			Columns: columns,
+			Where:   where,
 		}
 	}
 
@@ -466,10 +472,9 @@ func generateIndexDDL(
 	table readxml.Table,
 	index readxml.Index,
 ) error {
-	columns := readxml.SplitTrimSpace(index.Variable)
-
-	if len(columns) == 0 {
-		return fmt.Errorf("table %s has empty index", table.Name)
+	columns, where, err := indexDefinition(schema, table, index)
+	if err != nil {
+		return err
 	}
 
 	b.WriteString("CREATE ")
@@ -492,17 +497,69 @@ func generateIndexDDL(
 			b.WriteString(", ")
 		}
 
-		b.WriteString(
-			quoteIdent(readxml.SnakeCase(column)),
-		)
+		b.WriteString(quoteIdent(column))
 	}
 
-	b.WriteString(");\n")
+	b.WriteString(")")
+
+	if where != "" {
+		b.WriteString(" WHERE ")
+		b.WriteString(where)
+	}
+
+	b.WriteString(";\n")
 
 	return nil
 }
 
+// indexDefinition 返回索引的列（snake_case）和部分索引的条件 SQL（普通索引为空）。
+// 部分索引可以不写 variable，这时建在主键上：只为了按条件挑出行，索引列本身用不上。
+func indexDefinition(schema *readxml.Schema, table readxml.Table, index readxml.Index) ([]string, string, error) {
+	var columns []string
+	for _, column := range readxml.SplitTrimSpace(index.Variable) {
+		columns = append(columns, readxml.SnakeCase(column))
+	}
+
+	if index.Where == "" {
+		if len(columns) == 0 {
+			return nil, "", fmt.Errorf("table %s has empty index", table.Name)
+		}
+		return columns, "", nil
+	}
+
+	if index.Method == "" {
+		return nil, "", fmt.Errorf("table %s: 部分索引（where=%q）要用 method 指定名字", table.Name, index.Where)
+	}
+	if table.PrimaryKey == nil {
+		return nil, "", fmt.Errorf("table %s has no primary key", table.Name)
+	}
+	bean, err := readxml.FindBean(schema, table.Bean)
+	if err != nil {
+		return nil, "", err
+	}
+	conds, err := readxml.ParseWhere(bean, table.PrimaryKey.Variable, index.Where)
+	if err != nil {
+		return nil, "", fmt.Errorf("table %s: %w", table.Name, err)
+	}
+	if len(columns) == 0 {
+		columns = []string{readxml.SnakeCase(table.PrimaryKey.Variable)}
+	}
+	return columns, readxml.WhereSQL(conds, quoteIdent), nil
+}
+
+// normalizePredicate 把条件 SQL 化成可比较的形式。PostgreSQL 存的是自己反解的写法：
+// "x" = 0 存成 (x = 0)，-1 存成 '-1'::integer，所以去掉括号、引号和类型转换再比。
+// 条件只有 bool 列和整数常量，去掉这些不会把两个不同的条件变成一样。
+func normalizePredicate(s string) string {
+	s = strings.NewReplacer("::integer", "", "::bigint", "", "::smallint", "", "(", "", ")", "", `"`, "", "'", "").Replace(s)
+	return strings.ToLower(strings.Join(strings.Fields(s), " "))
+}
+
 func indexName(table readxml.Table, index readxml.Index) string {
+	if index.Where != "" {
+		return fmt.Sprintf("idx_%s_where_%s", table.Name, readxml.SnakeCase(index.Method))
+	}
+
 	var columns []string
 
 	for _, column := range readxml.SplitTrimSpace(index.Variable) {
@@ -642,13 +699,13 @@ func generateAlterDDL(b *strings.Builder, schema *readxml.Schema, table readxml.
 			continue
 		}
 
-		expectedColumns := make([]string, 0)
-
-		for _, column := range readxml.SplitTrimSpace(index.Variable) {
-			expectedColumns = append(expectedColumns, readxml.SnakeCase(column))
+		expectedColumns, expectedWhere, err := indexDefinition(schema, table, index)
+		if err != nil {
+			return err
 		}
 
-		if existing.Unique != index.Unique || !sameStrings(existing.Columns, expectedColumns) {
+		if existing.Unique != index.Unique || !sameStrings(existing.Columns, expectedColumns) ||
+			normalizePredicate(existing.Where) != normalizePredicate(expectedWhere) {
 			return fmt.Errorf("table %s index %s definition mismatch", table.Name, indexName(table, index))
 		}
 	}

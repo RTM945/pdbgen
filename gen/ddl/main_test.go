@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"pdbgen/readxml"
+)
 
 func TestSQLType(t *testing.T) {
 	cases := []struct {
@@ -66,5 +71,71 @@ func TestIdentityOptions(t *testing.T) {
 		if got != c.want {
 			t.Fatalf("start=%d step=%d = %q, want %q", c.start, c.step, got, c.want)
 		}
+	}
+}
+
+func partialSchema(indexes ...readxml.Index) *readxml.Schema {
+	return &readxml.Schema{
+		Schema: "public",
+		Beans: []readxml.Bean{{Name: "Probe", Variables: []readxml.Variable{
+			{Name: "id", Type: "int64"}, {Name: "uid", Type: "int64"},
+			{Name: "workerEnabled", Type: "bool"}, {Name: "state", Type: "int32"},
+		}}},
+		Tables: []readxml.Table{{
+			Name: "probe", Bean: "Probe",
+			PrimaryKey: &readxml.PrimaryKey{Variable: "id", AutoIncrement: true},
+			Indexes:    indexes,
+		}},
+	}
+}
+
+func TestGenerateIndexDDLPartial(t *testing.T) {
+	cases := []struct {
+		index readxml.Index
+		want  string
+	}{
+		{readxml.Index{Variable: "uid"},
+			`CREATE INDEX IF NOT EXISTS "idx_probe_uid" ON "public"."probe" ("uid");`},
+		{readxml.Index{Where: "workerEnabled=true", Method: "WorkerEnabled"},
+			`CREATE INDEX IF NOT EXISTS "idx_probe_where_worker_enabled" ON "public"."probe" ("id") WHERE "worker_enabled";`},
+		{readxml.Index{Variable: "uid", Unique: true, Where: "state=-1, workerEnabled=false", Method: "FailedByUid"},
+			`CREATE UNIQUE INDEX IF NOT EXISTS "idx_probe_where_failed_by_uid" ON "public"."probe" ("uid") WHERE "state" = -1 AND NOT "worker_enabled";`},
+	}
+	for _, c := range cases {
+		s := partialSchema(c.index)
+		var b strings.Builder
+		if err := generateIndexDDL(&b, s, s.Tables[0], c.index); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.TrimSpace(b.String()); got != c.want {
+			t.Errorf("got  %s\nwant %s", got, c.want)
+		}
+	}
+
+	s := partialSchema()
+	if err := generateIndexDDL(new(strings.Builder), s, s.Tables[0], readxml.Index{Where: "state=0"}); err == nil {
+		t.Error("部分索引没有 method 应该报错")
+	}
+}
+
+// TestNormalizePredicate 右边是本地 PostgreSQL 的 pg_get_expr(indpred) 实测结果。
+func TestNormalizePredicate(t *testing.T) {
+	cases := []struct{ ours, pg string }{
+		{`"worker_enabled"`, `worker_enabled`},
+		{`NOT "worker_enabled"`, `(NOT worker_enabled)`},
+		{`"state" = 0`, `(state = 0)`},
+		{`"state" = -1`, `(state = '-1'::integer)`},
+		{`"big" = 5000000000`, `(big = '5000000000'::bigint)`},
+		{`"state" = 0 AND "kind" = 2`, `((state = 0) AND (kind = 2))`},
+		{`"worker_enabled" AND "state" = 1`, `(worker_enabled AND (state = 1))`},
+		{``, ``},
+	}
+	for _, c := range cases {
+		if a, b := normalizePredicate(c.ours), normalizePredicate(c.pg); a != b {
+			t.Errorf("%q → %q, %q → %q", c.ours, a, c.pg, b)
+		}
+	}
+	if normalizePredicate(`"state" = 0`) == normalizePredicate(`(state = 1)`) {
+		t.Error("不同的条件不能相等")
 	}
 }

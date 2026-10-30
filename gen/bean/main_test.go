@@ -67,9 +67,34 @@ func TestGenerateTableGuardsPredicateColumns(t *testing.T) {
 	}
 }
 
+// TestGenerateTablePartialIndex 部分索引：常量写进 SQL，按 method 命名，条件列也进 CheckPredicate。
+func TestGenerateTablePartialIndex(t *testing.T) {
+	src := generate(t, probeSchema([]readxml.Variable{
+		{Name: "uid", Type: "int64"},
+		{Name: "workerEnabled", Type: "bool"},
+		{Name: "state", Type: "int32"},
+	},
+		readxml.Index{Where: "workerEnabled=true", Method: "WorkerEnabled"},
+		readxml.Index{Variable: "uid", Where: "state=-1, workerEnabled=false", Method: "FailedByUid", Unique: true},
+	))
+	mustContain(t, src,
+		"func (t probe) ListWorkerEnabled(ctx context.Context) []*Probe {",
+		"func (t probe) SelectListWorkerEnabled(ctx context.Context) []*Probe {",
+		"return t.queryWhereWorkerEnabled(ctx, dbctx.QuerierFromCtx(ctx))",
+		`WHERE \"worker_enabled\""`,
+		"dbctx.QueryList(ctx, q, query, scanProbe)\n",
+		`dbctx.CheckPredicate(ctx, "probe", dirtyProbeWorkerEnabled)`,
+		"func (t probe) GetFailedByUid(ctx context.Context, uid int64) *Probe {",
+		"func (t probe) SelectFailedByUid(ctx context.Context, uid int64) *Probe {",
+		`WHERE \"uid\" = $1 AND \"state\" = -1 AND NOT \"worker_enabled\""`,
+		`dbctx.CheckPredicate(ctx, "probe", dirtyProbeUid|dirtyProbeState|dirtyProbeWorkerEnabled)`,
+	)
+}
+
 // TestBuildTableGenRejects 框架不支持的写法在生成阶段直接报错，而不是生成出编不过或跑不对的代码。
 func TestBuildTableGenRejects(t *testing.T) {
 	str := readxml.Variable{Name: "name", Type: "string"}
+	flag := readxml.Variable{Name: "on", Type: "bool"}
 	for _, tc := range []struct {
 		name   string
 		schema *readxml.Schema
@@ -95,6 +120,24 @@ func TestBuildTableGenRejects(t *testing.T) {
 		{"重复索引", probeSchema([]readxml.Variable{str},
 			readxml.Index{Variable: "name"}, readxml.Index{Variable: "name", Unique: true}), "重复"},
 		{"和主键相同的索引", probeSchema([]readxml.Variable{str}, readxml.Index{Variable: "id", Unique: true}), "重复"},
+		{"部分索引没有 method", probeSchema([]readxml.Variable{flag}, readxml.Index{Where: "on=true"}), "method"},
+		{"method 小写", probeSchema([]readxml.Variable{flag}, readxml.Index{Where: "on=true", Method: "on"}), "method"},
+		{"普通索引带 method", probeSchema([]readxml.Variable{str}, readxml.Index{Variable: "name", Method: "Name"}), "要配 where"},
+		{"没有 variable 的 unique 部分索引", probeSchema([]readxml.Variable{flag},
+			readxml.Index{Where: "on=true", Method: "On", Unique: true}), "不能 unique"},
+		{"条件用了主键", probeSchema([]readxml.Variable{flag}, readxml.Index{Where: "id=1", Method: "One"}), "主键"},
+		{"条件列不存在", probeSchema([]readxml.Variable{flag}, readxml.Index{Where: "off=true", Method: "Off"}), "不在 bean 里"},
+		{"条件列是字符串", probeSchema([]readxml.Variable{str}, readxml.Index{Where: "name=a", Method: "A"}), "只支持 bool 和整数"},
+		{"bool 常量写错", probeSchema([]readxml.Variable{flag}, readxml.Index{Where: "on=1", Method: "On"}), "true 或 false"},
+		{"整数越界", probeSchema([]readxml.Variable{{Name: "kind", Type: "int8"}},
+			readxml.Index{Where: "kind=300", Method: "Big"}), "范围内的整数"},
+		{"条件重复", probeSchema([]readxml.Variable{flag}, readxml.Index{Where: "on=true, on=false", Method: "On"}), "重复"},
+		{"相同的部分索引", probeSchema([]readxml.Variable{flag},
+			readxml.Index{Where: "on=true", Method: "On"}, readxml.Index{Where: "on = true", Method: "On2"}), "重复"},
+		{"部分索引方法名重复", probeSchema([]readxml.Variable{flag},
+			readxml.Index{Where: "on=true", Method: "On"}, readxml.Index{Where: "on=false", Method: "On"}), "方法名"},
+		{"部分索引方法名和普通索引重复", probeSchema([]readxml.Variable{str, flag},
+			readxml.Index{Variable: "name"}, readxml.Index{Where: "on=true", Method: "ByName"}), "方法名"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := buildTableGen(tc.schema, tc.schema.Tables[0])

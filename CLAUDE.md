@@ -48,6 +48,7 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL �
 生成代码对表结构的约定：
 
 - 复合索引用逗号分隔写在 `index` 的 `variable` 上（`uid,actId`）。**unique 索引生成单行查询 `GetByXxx`/`SelectByXxx`，非 unique 索引生成列表查询 `ListByXxx`/`SelectListByXxx`**，主键固定是 `GetById`/`SelectById`。改 `unique` 会改变生成的 API 形态。
+- 部分索引：`<index variable="uid" where="state=0, flag=true" method="PendingByUid"/>` 生成 `ListPendingByUid` / `SelectListPendingByUid`（unique 时 `Get`/`Select` 前缀），`variable` 可省（索引建在主键上，查询无参数）。`where` 只支持 bool 和整数列，常量写进 SQL 而不是 `$n` 参数（否则规划器用不上部分索引）。规则见 [docs/design.md](docs/design.md) 第 4 节。
 - 主键必须是 `int64` 且 `autoIncrement="true"`：不出现在 INSERT 的字段列表里，靠 `RETURNING id` 回填，也不参与 UPDATE。`primaryKey` 的 `start` / `step` 生成 `START WITH` / `INCREMENT BY`；只影响 identity 首次创建，已存在的 identity 不会被自动修改。
 - `ptable/` 下的 `<表名>.go` 全部是生成产物，不要手改；改结构要改 `pdb.xml`、必要时改模板，然后重新生成并提交。`ptable/delete_test.go` 是手写测试。
 

@@ -156,6 +156,7 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 | `DeleteById` | 先 `GetById`（缓存优先），找不到返回 false；找到后标记删除 |
 | `GetByYyy` / `SelectByYyy` | **unique 索引**查询（`index unique="true"`） |
 | `ListByYyy` / `SelectListByYyy` | **非 unique 索引**查询，返回 `[]*Xxx` |
+| `List<Method>` / `SelectList<Method>`，unique 时 `Get<Method>` / `Select<Method>` | **部分索引**查询（`index where="..." method="..."`），参数是 `variable` 里的列，条件常量写死在 SQL 里 |
 | `GetAll` / `SelectAll` | 全表，返回 `[]*Xxx` |
 | `SetXxx` / `Xxx()` | 写入（值没变不置脏位；实体脱离事务时 panic）/ 读取 |
 | `Delete()` / `IsDeleted()` | 标记删除 / 查询删除状态 |
@@ -173,6 +174,9 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 - 列名是小写字母开头的 Go 标识符，不能是 Go 关键字（`type` 换成 `typ` / `kind`），不能和生成代码的内部名字冲突（`loaded`、`deleted`、`detached`、`dirty`、`t`、`o`、`q`、`ctx`、`query`，以及 `tableName`、`delete` 这类和实体方法同名的列）；
 - 类型只能是 `int64` / `int32` / `int16` / `int8` / `string` / `bool` / `float32` / `float64`；
 - 同一组列只能有一个索引，也不能和主键相同；一个 bean 只能映射一张表。
+- 部分索引：`where` 是逗号分隔的 `变量=常量`（之间是 AND），只支持 bool 列（`true` / `false`）和整数列（按类型校验范围），不能用主键，同一列不能出现两次；必须写 `method`（大写字母开头的 Go 标识符），普通索引不能写 `method`；不写 `variable` 时索引建在主键上、查询没有参数，这时不能 unique；列加条件相同的部分索引不能重复，生成的方法名不能和别的查询重复。
+
+部分索引的条件常量直接写进查询 SQL，不用 `$n` 参数：PostgreSQL 只在查询条件能推出索引条件时才用部分索引，参数化的 `worker_enabled = $1` 在通用计划里推不出来。bool 条件写成 `"col"` / `NOT "col"`，和库里存的形式一致。条件列和 `variable` 一样进 `CheckPredicate`。genddl 生成 `CREATE [UNIQUE] INDEX IF NOT EXISTS "idx_<表>_where_<method 的 snake_case>" ... WHERE ...`；已存在的索引用 `pg_get_expr(indpred)` 读出条件，去掉括号、引号和整数类型转换后比较，对不上报错，不重建。
 
 ## 5. 已知缺口
 
@@ -186,6 +190,13 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 - **Procedure 与 Transaction 的职责划分与命名**：[design-procedure-transaction.md](design-procedure-transaction.md)（提案，Phase 1-5 已实施）。实施时并入本文正文，并在变更记录里留痕。
 
 ## 7. 变更记录
+
+### 2026-10-30 支持部分索引
+
+- **改了什么**：`index` 新增 `where`、`method` 属性（`readxml.Index.Where` / `Method`，解析和校验在 `readxml.ParseWhere`）。genbeans 按 `method` 生成 `List<Method>` / `SelectList<Method>`（unique 时 `Get<Method>` / `Select<Method>`），内部查询函数 `queryWhere<Method>`，条件常量写进 SQL，条件列进 `CheckPredicate`；模板支持没有参数的查询。genddl 生成带 `WHERE` 的索引，内省时读 `pg_get_expr(indpred, indrelid)` 并按 `normalizePredicate` 比较条件。
+- **为什么**：expservergo 重启时要按 `worker_enabled = true` 恢复 worker，只有少数行满足条件；全列索引既大又不能生成无参的查询方法，手写查询又绕开了生成器。
+- **影响范围**：没有 `where` 的索引，生成代码和 DDL 都不变（重新生成本仓库 `ptable`，`git diff` 为空）；普通索引写 `method` 现在会报错。部分索引只支持 bool 和整数条件。
+- **验证状态**：`go build/vet/test` 通过；新增 genbeans 部分索引生成和拒绝用例、genddl 的 DDL 生成和条件比较用例（比较用例的 PG 一侧是本地 PostgreSQL `pg_get_expr` 的实测输出）。在 expservergo 的本地库上用临时 schema 跑通：执行 genddl 输出后再跑一次只剩 `CREATE SCHEMA`，`EXPLAIN` 走部分索引。
 
 ### 2026-10-28 去掉 sensitive 列
 

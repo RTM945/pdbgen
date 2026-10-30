@@ -127,33 +127,33 @@ func scan{{ .TypeName }}(s dbctx.Scanner) (*{{ .TypeName }}, error) {
 	return o, nil
 }
 {{ range .QueryMethods }}
-func (t {{ $.ReceiverName }}) query{{ .Name }}(ctx context.Context, q dbctx.Querier, {{ .Params }}) {{ if .IsList }}[]{{ end }}*{{ $.TypeName }} {
+func (t {{ $.ReceiverName }}) {{ .Func }}(ctx context.Context, q dbctx.Querier{{ if .Params }}, {{ .Params }}{{ end }}) {{ if .IsList }}[]{{ end }}*{{ $.TypeName }} {
 {{- if .Columns }}
 	dbctx.CheckPredicate(ctx, "{{ $.TableName }}", {{ .Columns }})
 {{- end }}
 	const query = "SELECT " + selectColumns{{ $.TypeName }} + " FROM {{ quote $.TableName }} WHERE {{ .Where }}"
-	return dbctx.Query{{ if .IsList }}List{{ else }}One{{ end }}(ctx, q, query, scan{{ $.TypeName }}, {{ .Args }})
+	return dbctx.Query{{ if .IsList }}List{{ else }}One{{ end }}(ctx, q, query, scan{{ $.TypeName }}{{ if .Args }}, {{ .Args }}{{ end }})
 }
 {{ if .IsList }}
-func (t {{ $.ReceiverName }}) ListBy{{ .Name }}(ctx context.Context, {{ .Params }}) []*{{ $.TypeName }} {
-	return t.query{{ .Name }}(ctx, dbctx.SQLTxFromCtx(ctx), {{ .Args }})
+func (t {{ $.ReceiverName }}) List{{ .Suffix }}(ctx context.Context{{ if .Params }}, {{ .Params }}{{ end }}) []*{{ $.TypeName }} {
+	return t.{{ .Func }}(ctx, dbctx.SQLTxFromCtx(ctx){{ if .Args }}, {{ .Args }}{{ end }})
 }
 
-func (t {{ $.ReceiverName }}) SelectListBy{{ .Name }}(ctx context.Context, {{ .Params }}) []*{{ $.TypeName }} {
-	return t.query{{ .Name }}(ctx, dbctx.QuerierFromCtx(ctx), {{ .Args }})
+func (t {{ $.ReceiverName }}) SelectList{{ .Suffix }}(ctx context.Context{{ if .Params }}, {{ .Params }}{{ end }}) []*{{ $.TypeName }} {
+	return t.{{ .Func }}(ctx, dbctx.QuerierFromCtx(ctx){{ if .Args }}, {{ .Args }}{{ end }})
 }
 {{ else }}
-func (t {{ $.ReceiverName }}) GetBy{{ .Name }}(ctx context.Context, {{ .Params }}) *{{ $.TypeName }} {
+func (t {{ $.ReceiverName }}) Get{{ .Suffix }}(ctx context.Context, {{ .Params }}) *{{ $.TypeName }} {
 {{- if .IsPrimaryKey }}
 	if o, ok := dbctx.GetCachedRecordAs[*{{ $.TypeName }}](ctx, "{{ $.TableName }}", {{ .Args }}); ok {
 		return o
 	}
 {{- end }}
-	return t.query{{ .Name }}(ctx, dbctx.SQLTxFromCtx(ctx), {{ .Args }})
+	return t.{{ .Func }}(ctx, dbctx.SQLTxFromCtx(ctx), {{ .Args }})
 }
 
-func (t {{ $.ReceiverName }}) SelectBy{{ .Name }}(ctx context.Context, {{ .Params }}) *{{ $.TypeName }} {
-	return t.query{{ .Name }}(ctx, dbctx.QuerierFromCtx(ctx), {{ .Args }})
+func (t {{ $.ReceiverName }}) Select{{ .Suffix }}(ctx context.Context, {{ .Params }}) *{{ $.TypeName }} {
+	return t.{{ .Func }}(ctx, dbctx.QuerierFromCtx(ctx), {{ .Args }})
 }
 {{ end }}
 {{- end }}

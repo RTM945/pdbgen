@@ -52,6 +52,10 @@
     <table name="user_red_envelope" bean="RedEnvelope">
         <primaryKey name="pk_user_red_envelope_id" variable="id" autoIncrement="true"/>
         <index name="joint_index_user_red_envelope_uid_act_id" variable="uid,actId" unique="true"/>
+        <!-- 部分索引：只索引满足 where 的行，method 是方法名。
+             CREATE INDEX idx_user_red_envelope_where_unfinished_by_uid ON user_red_envelope (uid) WHERE today_count = 0
+             生成 ListUnfinishedByUid(ctx, uid) / SelectListUnfinishedByUid(ctx, uid)；不写 variable 时查询没有参数 -->
+        <index variable="uid" where="todayCount=0" method="UnfinishedByUid"/>
     </table>
 </pdb>
 
