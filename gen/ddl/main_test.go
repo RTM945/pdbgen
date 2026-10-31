@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"pdbgen/readxml"
 )
@@ -137,5 +141,154 @@ func TestNormalizePredicate(t *testing.T) {
 	}
 	if normalizePredicate(`"state" = 0`) == normalizePredicate(`(state = 1)`) {
 		t.Error("不同的条件不能相等")
+	}
+}
+
+// TestCheckNames 名字超过 63 字节、在 schema 里重名都报错；可以用 name 属性起一个短的。
+func TestCheckNames(t *testing.T) {
+	long := readxml.Index{Variable: "uid", Line: 9}
+	s := &readxml.Schema{
+		File: "pdb.xml", Schema: "public",
+		Beans: []readxml.Bean{{Name: "Probe", Variables: []readxml.Variable{{Name: "id", Type: "int64"}, {Name: "uid", Type: "int64"}}}},
+		Tables: []readxml.Table{{
+			Name: "user_activity_reward_progress_for_the_spring_festival_event", Bean: "Probe", Line: 7,
+			PrimaryKey: &readxml.PrimaryKey{Variable: "id", AutoIncrement: true, Line: 8},
+			Indexes:    []readxml.Index{long},
+		}},
+	}
+	err := checkNames(s)
+	if err == nil {
+		t.Fatal("应该报错")
+	}
+	for _, want := range []string{
+		`pdb.xml:8: 主键名 "pk_user_activity_reward_progress_for_the_spring_festival_event_id" 有 65 字节`,
+		`<primaryKey name="...">`,
+		`pdb.xml:9: 索引名`, `<index name="...">`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("错误里应该有 %q，实际:\n%v", want, err)
+		}
+	}
+
+	s.Tables[0].PrimaryKey.Name = "pk_reward_progress"
+	s.Tables[0].Indexes[0].Name = "idx_reward_progress_uid"
+	if err := checkNames(s); err != nil {
+		t.Fatalf("起了短名字之后应该通过: %v", err)
+	}
+
+	s.Tables[0].Indexes[0].Name = s.Tables[0].Name
+	if err := checkNames(s); err == nil || !strings.Contains(err.Error(), "重名") {
+		t.Fatalf("索引和表重名应该报错，实际: %v", err)
+	}
+}
+
+// TestGenerateAgainstDatabase 在真实 PG 的临时 schema 里跑一遍完整的流程：建表、再跑一遍什么都不用做、
+// 加列加索引、定义对不上时报错。PDBGEN_REQUIRE_DB=1 时连不上库直接失败。
+func TestGenerateAgainstDatabase(t *testing.T) {
+	base, err := readxml.LoadSchema("../../pdb.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	conn, err := connect(ctx, base.URL)
+	if err != nil {
+		if os.Getenv("PDBGEN_REQUIRE_DB") != "" {
+			t.Fatalf("连不上 pdb.xml 里的数据库: %v", err)
+		}
+		t.Skipf("跳过集成测试，连不上 pdb.xml 里的数据库: %v", err)
+	}
+	t.Cleanup(func() { conn.Close(context.Background()) }) // 先注册的后执行：删完临时 schema 再关连接
+
+	schemaName := fmt.Sprintf("pdbgen_ddl_test_%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		if _, err := conn.Exec(context.Background(), `DROP SCHEMA IF EXISTS "`+schemaName+`" CASCADE`); err != nil {
+			t.Errorf("删除临时 schema %s 失败: %v", schemaName, err)
+		}
+	})
+
+	parse := func(state, unique, extra string) *readxml.Schema {
+		t.Helper()
+		s, err := readxml.ParseSchema(strings.NewReader(`<pdb schema="`+schemaName+`">
+  <bean name="Probe">
+    <variable name="id" type="int64"/>
+    <variable name="uid" type="int64"/>
+    <variable name="state" type="`+state+`"/>`+extra+`
+  </bean>
+  <table name="probe" bean="Probe">
+    <primaryKey variable="id" autoIncrement="true" start="1000"/>
+    <index variable="uid" unique="`+unique+`"/>
+  </table>
+</pdb>`), "pdb.xml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	gen := func(s *readxml.Schema) string {
+		t.Helper()
+		ddl, err := generate(ctx, s, conn)
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+		if !strings.Contains(ddl, "BEGIN;") || !strings.HasSuffix(ddl, "COMMIT;\n") {
+			t.Fatalf("DDL 应该包在事务里:\n%s", ddl)
+		}
+		return ddl
+	}
+	apply := func(s *readxml.Schema) string {
+		t.Helper()
+		ddl := gen(s)
+		if _, err := conn.Exec(ctx, ddl); err != nil {
+			t.Fatalf("执行生成的 DDL 失败: %v\n%s", err, ddl)
+		}
+		return ddl
+	}
+	nothingToDo := func(s *readxml.Schema) {
+		t.Helper()
+		ddl := gen(s)
+		for _, stmt := range []string{"CREATE TABLE", "ALTER TABLE", "CREATE INDEX", "CREATE UNIQUE INDEX"} {
+			if strings.Contains(ddl, stmt) {
+				t.Fatalf("库里已经是 pdb.xml 的样子，不应该再生成 %s:\n%s", stmt, ddl)
+			}
+		}
+	}
+	mustContain := func(ddl string, wants ...string) {
+		t.Helper()
+		for _, want := range wants {
+			if !strings.Contains(ddl, want) {
+				t.Fatalf("DDL 里应该有 %q:\n%s", want, ddl)
+			}
+		}
+	}
+
+	v1 := parse("int32", "true", "")
+	mustContain(apply(v1),
+		`CREATE TABLE IF NOT EXISTS "`+schemaName+`"."probe"`,
+		`ADD GENERATED ALWAYS AS IDENTITY (START WITH 1000)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS "idx_probe_uid"`,
+	)
+	nothingToDo(v1)
+
+	var id int64
+	if err := conn.QueryRow(ctx, `INSERT INTO "`+schemaName+`"."probe" ("uid", "state") VALUES (1, 0) RETURNING "id"`).Scan(&id); err != nil || id != 1000 {
+		t.Fatalf("identity 应该从 1000 开始，实际 id=%d err=%v", id, err)
+	}
+
+	// 加一列、一个部分索引
+	v2 := parse("int32", "true", `
+    <variable name="flag" type="bool"/>`)
+	v2.Tables[0].Indexes = append(v2.Tables[0].Indexes, readxml.Index{Where: "flag=true", Method: "Flagged", Line: 11})
+	mustContain(apply(v2),
+		`ADD COLUMN "flag" BOOLEAN NOT NULL DEFAULT false`,
+		`CREATE INDEX IF NOT EXISTS "idx_probe_where_flagged" ON "`+schemaName+`"."probe" ("id") WHERE "flag"`,
+	)
+	nothingToDo(v2)
+
+	// 已有的列和索引只校验：对不上就报错（带 pdb.xml 的行号），不改表
+	if _, err := generate(ctx, parse("int64", "true", ""), conn); err == nil || !strings.Contains(err.Error(), "pdb.xml:5: table probe column state type mismatch") {
+		t.Fatalf("列的类型对不上应该报错，实际: %v", err)
+	}
+	if _, err := generate(ctx, parse("int32", "false", ""), conn); err == nil || !strings.Contains(err.Error(), "index idx_probe_uid definition mismatch") {
+		t.Fatalf("索引定义对不上应该报错，实际: %v", err)
 	}
 }

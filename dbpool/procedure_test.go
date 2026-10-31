@@ -82,11 +82,7 @@ func TestProcedureAppliesTimeout(t *testing.T) {
 // TestBlockingLockTimeoutIsNotAcquired 阻塞锁等到 lock_timeout 还没拿到，返回的和 try 锁一样是
 // ErrAdvisoryLockNotAcquired——调用方只需要认一个"忙"信号。
 func TestBlockingLockTimeoutIsNotAcquired(t *testing.T) {
-	setupTestDB(t)
-
-	old := beginSQL
-	beginSQL = buildBeginSQL(0, 0, 100)
-	t.Cleanup(func() { beginSQL = old })
+	reopen(t, func(c *Config) { c.LockTimeout = 100 * time.Millisecond })
 
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()

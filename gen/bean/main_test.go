@@ -11,6 +11,7 @@ import (
 func probeSchema(vars []readxml.Variable, indexes ...readxml.Index) *readxml.Schema {
 	return &readxml.Schema{
 		Package: "ptable",
+		Schema:  "public",
 		Beans:   []readxml.Bean{{Name: "Probe", Variables: append([]readxml.Variable{{Name: "id", Type: "int64"}}, vars...)}},
 		Tables: []readxml.Table{{
 			Name:       "probe",
@@ -138,6 +139,10 @@ func TestBuildTableGenRejects(t *testing.T) {
 			readxml.Index{Where: "on=true", Method: "On"}, readxml.Index{Where: "on=false", Method: "On"}), "方法名"},
 		{"部分索引方法名和普通索引重复", probeSchema([]readxml.Variable{str, flag},
 			readxml.Index{Variable: "name"}, readxml.Index{Where: "on=true", Method: "ByName"}), "方法名"},
+		{"lock 列不存在", withLock(probeSchema([]readxml.Variable{str}), "uid"), "不在 bean 里"},
+		{"lock 列不是 int64", withLock(probeSchema([]readxml.Variable{str}), "name"), "必须是 int64"},
+		{"和 foreign 字段同名", probeSchema([]readxml.Variable{{Name: "foreign", Type: "bool"}}), "内部名字冲突"},
+		{"和 LockKey 方法同名", probeSchema([]readxml.Variable{{Name: "lockKey", Type: "int64"}}), "内部名字冲突"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := buildTableGen(tc.schema, tc.schema.Tables[0])
@@ -152,7 +157,32 @@ func TestBuildTableGenRejects(t *testing.T) {
 func TestCheckTablesRejectsSharedBean(t *testing.T) {
 	s := probeSchema([]readxml.Variable{{Name: "name", Type: "string"}})
 	s.Tables = append(s.Tables, readxml.Table{Name: "probe2", Bean: "Probe", PrimaryKey: s.Tables[0].PrimaryKey})
-	if err := checkTables(s); err == nil || !strings.Contains(err.Error(), "一个 bean 只能映射一张表") {
-		t.Fatalf("期望拒绝共用 bean，实际: %v", err)
+	if errs := checkTables(s); len(errs) != 1 || !strings.Contains(errs[0], "一个 bean 只能映射一张表") {
+		t.Fatalf("期望拒绝共用 bean，实际: %v", errs)
+	}
+}
+
+func withLock(s *readxml.Schema, lock string) *readxml.Schema {
+	s.Tables[0].Lock = lock
+	return s
+}
+
+// TestGenerateTableLock 声明了 lock 的表：实体实现 dbctx.Owned，SetXxx / Delete 先查 foreign；没声明的表不生成这些。
+func TestGenerateTableLock(t *testing.T) {
+	vars := []readxml.Variable{{Name: "uid", Type: "int64"}, {Name: "state", Type: "int32"}}
+	src := generate(t, withLock(probeSchema(vars), "uid"))
+	mustContain(t, src,
+		"var _ dbctx.Owned = (*Probe)(nil)",
+		`func (o *Probe) LockKey() (string, int64) { return "uid", o.uid }`,
+		"func (o *Probe) MarkForeign() { o.foreign = true }",
+	)
+	// 每个 setter 和 Delete 都要检查
+	if n, want := strings.Count(src, "if o.foreign {\n\t\tdbctx.PanicForeign(o)"), len(vars)+1; n != want {
+		t.Fatalf("SetXxx 和 Delete 都要检查 foreign，期望 %d 处，实际 %d 处:\n%s", want, n, src)
+	}
+
+	plain := generate(t, probeSchema(vars))
+	if strings.Contains(plain, "foreign") || strings.Contains(plain, "LockKey") {
+		t.Fatalf("没声明 lock 的表不应该生成归属检查:\n%s", plain)
 	}
 }

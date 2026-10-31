@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"pdbgen/dbctx"
 	"pdbgen/ptable"
 )
@@ -30,8 +32,8 @@ func TestNestedProcedureRejected(t *testing.T) {
 				t.Errorf("嵌套事务应返回 ErrNestedTransaction，实际: %v", err)
 			}
 		}
-		if err := Query(ctx, func(context.Context) error { return nil }); err == nil {
-			t.Error("事务里调用 dbpool.Query 应该报错")
+		if err := Query(ctx, func(context.Context) error { return nil }); !errors.Is(err, ErrInTransaction) {
+			t.Errorf("事务里调用 dbpool.Query 应该返回 ErrInTransaction，实际: %v", err)
 		}
 		return nil
 	})
@@ -191,8 +193,9 @@ func TestDeleteThenInsertSameUniqueKeyFails(t *testing.T) {
 	defer cleanupRedEnvelope(t, ctx, uid)
 	seedRedEnvelope(t, ctx, uid, actId, 1, 0)
 
+	var err error
 	msg := catchPanic(t, func() {
-		_ = WithTx(ctx, func(ctx context.Context) error {
+		err = WithTx(ctx, func(ctx context.Context) error {
 			ptable.UserRedEnvelopeTable.GetByUidActId(ctx, uid, actId).Delete()
 			fresh := ptable.NewRedEnvelope()
 			fresh.SetUid(uid)
@@ -201,8 +204,11 @@ func TestDeleteThenInsertSameUniqueKeyFails(t *testing.T) {
 			return nil
 		})
 	})
-	if !strings.Contains(msg, "23505") {
-		t.Fatalf("应该撞唯一索引（SQLSTATE 23505），实际: %q", msg)
+	if msg != "" {
+		t.Fatalf("SQL 错误应该作为返回值，而不是 panic: %s", msg)
+	}
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "23505" {
+		t.Fatalf("应该撞唯一索引（SQLSTATE 23505），实际: %v", err)
 	}
 	if n, err := countRedEnvelope(ctx, uid); err != nil || n != 1 {
 		t.Fatalf("事务应该回滚、原来的行还在，实际 n=%d err=%v", n, err)

@@ -145,11 +145,11 @@ func (o *User) FlushStmt() (string, []any) {
 	case !o.loaded:
 		return "", nil
 	case o.deleted:
-		return "DELETE FROM \"user\" WHERE \"id\" = $1", []any{o.id}
+		return "DELETE FROM \"public\".\"user\" WHERE \"id\" = $1", []any{o.id}
 	case o.dirty == 0:
 		return "", nil
 	}
-	return dbctx.UpdateStmt("\"user\"", "\"id\"", o.id, updateColumnsUser, o.dirty,
+	return dbctx.UpdateStmt("\"public\".\"user\"", "\"id\"", o.id, updateColumnsUser, o.dirty,
 		o.name,
 		o.lastLoginAt,
 		o.createdAt,
@@ -173,7 +173,7 @@ func scanUser(s dbctx.Scanner) (*User, error) {
 }
 
 func (t user) queryId(ctx context.Context, q dbctx.Querier, id int64) *User {
-	const query = "SELECT " + selectColumnsUser + " FROM \"user\" WHERE \"id\" = $1"
+	const query = "SELECT " + selectColumnsUser + " FROM \"public\".\"user\" WHERE \"id\" = $1"
 	return dbctx.QueryOne(ctx, q, query, scanUser, id)
 }
 
@@ -198,7 +198,7 @@ func (t user) DeleteById(ctx context.Context, id int64) bool {
 	return true
 }
 
-const selectAllUser = "SELECT " + selectColumnsUser + " FROM \"user\""
+const selectAllUser = "SELECT " + selectColumnsUser + " FROM \"public\".\"user\""
 
 func (t user) GetAll(ctx context.Context) []*User {
 	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx), selectAllUser, scanUser)
@@ -215,15 +215,13 @@ func (t user) Insert(ctx context.Context, o *User) {
 	}
 	tx := dbctx.SQLTxFromCtx(ctx)
 	dbctx.GetOrAddCachedRecord(ctx, o) // 主键还是 0：只登记快照，回滚时恢复成插入前的样子
-	const query = "INSERT INTO \"user\" (\"name\", \"last_login_at\", \"created_at\", \"token\") VALUES ($1, $2, $3, $4) RETURNING \"id\""
-	if err := tx.QueryRow(ctx, query,
+	const query = "INSERT INTO \"public\".\"user\" (\"name\", \"last_login_at\", \"created_at\", \"token\") VALUES ($1, $2, $3, $4) RETURNING \"id\""
+	dbctx.InsertReturning(ctx, tx, query, &o.id,
 		o.name,
 		o.lastLoginAt,
 		o.createdAt,
 		o.token,
-	).Scan(&o.id); err != nil {
-		panic(err)
-	}
+	)
 	o.loaded, o.dirty = true, 0
 	dbctx.GetOrAddCachedRecord(ctx, o) // 主键回填后进身份表
 }

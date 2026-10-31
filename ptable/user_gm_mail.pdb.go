@@ -196,11 +196,11 @@ func (o *GMMail) FlushStmt() (string, []any) {
 	case !o.loaded:
 		return "", nil
 	case o.deleted:
-		return "DELETE FROM \"user_gm_mail\" WHERE \"id\" = $1", []any{o.id}
+		return "DELETE FROM \"public\".\"user_gm_mail\" WHERE \"id\" = $1", []any{o.id}
 	case o.dirty == 0:
 		return "", nil
 	}
-	return dbctx.UpdateStmt("\"user_gm_mail\"", "\"id\"", o.id, updateColumnsGMMail, o.dirty,
+	return dbctx.UpdateStmt("\"public\".\"user_gm_mail\"", "\"id\"", o.id, updateColumnsGMMail, o.dirty,
 		o.params,
 		o.awardList,
 		o.startAt,
@@ -227,7 +227,7 @@ func scanGMMail(s dbctx.Scanner) (*GMMail, error) {
 }
 
 func (t gMMail) queryId(ctx context.Context, q dbctx.Querier, id int64) *GMMail {
-	const query = "SELECT " + selectColumnsGMMail + " FROM \"user_gm_mail\" WHERE \"id\" = $1"
+	const query = "SELECT " + selectColumnsGMMail + " FROM \"public\".\"user_gm_mail\" WHERE \"id\" = $1"
 	return dbctx.QueryOne(ctx, q, query, scanGMMail, id)
 }
 
@@ -252,7 +252,7 @@ func (t gMMail) DeleteById(ctx context.Context, id int64) bool {
 	return true
 }
 
-const selectAllGMMail = "SELECT " + selectColumnsGMMail + " FROM \"user_gm_mail\""
+const selectAllGMMail = "SELECT " + selectColumnsGMMail + " FROM \"public\".\"user_gm_mail\""
 
 func (t gMMail) GetAll(ctx context.Context) []*GMMail {
 	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx), selectAllGMMail, scanGMMail)
@@ -269,8 +269,8 @@ func (t gMMail) Insert(ctx context.Context, o *GMMail) {
 	}
 	tx := dbctx.SQLTxFromCtx(ctx)
 	dbctx.GetOrAddCachedRecord(ctx, o) // 主键还是 0：只登记快照，回滚时恢复成插入前的样子
-	const query = "INSERT INTO \"user_gm_mail\" (\"params\", \"award_list\", \"start_at\", \"end_at\", \"channel\", \"user_created_at\", \"condition\") VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING \"id\""
-	if err := tx.QueryRow(ctx, query,
+	const query = "INSERT INTO \"public\".\"user_gm_mail\" (\"params\", \"award_list\", \"start_at\", \"end_at\", \"channel\", \"user_created_at\", \"condition\") VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING \"id\""
+	dbctx.InsertReturning(ctx, tx, query, &o.id,
 		o.params,
 		o.awardList,
 		o.startAt,
@@ -278,9 +278,7 @@ func (t gMMail) Insert(ctx context.Context, o *GMMail) {
 		o.channel,
 		o.userCreatedAt,
 		o.condition,
-	).Scan(&o.id); err != nil {
-		panic(err)
-	}
+	)
 	o.loaded, o.dirty = true, 0
 	dbctx.GetOrAddCachedRecord(ctx, o) // 主键回填后进身份表
 }

@@ -24,8 +24,12 @@ type Mail struct {
 	loaded   bool   // 对应数据库里的一行：查出来的，或者 Insert 过的
 	deleted  bool   // 标记了删除，提交前 flush 成 DELETE
 	detached bool   // 脱离了事务：SetXxx / Delete 会 panic
+	foreign  bool   // 当前事务没有持有保护这一行的锁（uid 的值）：SetXxx / Delete 会 panic
 	dirty    uint64 // 改过、还没落库的列，第 i 位对应 updateColumnsMail[i]
 }
+
+// Mail 的每一行由 key 等于 uid 的 bigint 咨询锁保护（pdb.xml 的 lock），修改要持有它。
+var _ dbctx.Owned = (*Mail)(nil)
 
 const (
 	dirtyMailUid       uint64 = 1 << 0
@@ -63,6 +67,9 @@ func (o *Mail) SetUid(v int64) {
 	if o.detached {
 		dbctx.PanicDetached(o)
 	}
+	if o.foreign {
+		dbctx.PanicForeign(o)
+	}
 	if o.uid != v {
 		o.uid = v
 		o.dirty |= dirtyMailUid
@@ -76,6 +83,9 @@ func (o *Mail) ConfId() int32 {
 func (o *Mail) SetConfId(v int32) {
 	if o.detached {
 		dbctx.PanicDetached(o)
+	}
+	if o.foreign {
+		dbctx.PanicForeign(o)
 	}
 	if o.confId != v {
 		o.confId = v
@@ -91,6 +101,9 @@ func (o *Mail) SetState(v int32) {
 	if o.detached {
 		dbctx.PanicDetached(o)
 	}
+	if o.foreign {
+		dbctx.PanicForeign(o)
+	}
 	if o.state != v {
 		o.state = v
 		o.dirty |= dirtyMailState
@@ -104,6 +117,9 @@ func (o *Mail) ReceiveAt() int64 {
 func (o *Mail) SetReceiveAt(v int64) {
 	if o.detached {
 		dbctx.PanicDetached(o)
+	}
+	if o.foreign {
+		dbctx.PanicForeign(o)
 	}
 	if o.receiveAt != v {
 		o.receiveAt = v
@@ -119,6 +135,9 @@ func (o *Mail) SetParams(v string) {
 	if o.detached {
 		dbctx.PanicDetached(o)
 	}
+	if o.foreign {
+		dbctx.PanicForeign(o)
+	}
 	if o.params != v {
 		o.params = v
 		o.dirty |= dirtyMailParams
@@ -133,6 +152,9 @@ func (o *Mail) SetAwardList(v string) {
 	if o.detached {
 		dbctx.PanicDetached(o)
 	}
+	if o.foreign {
+		dbctx.PanicForeign(o)
+	}
 	if o.awardList != v {
 		o.awardList = v
 		o.dirty |= dirtyMailAwardList
@@ -143,6 +165,9 @@ func (o *Mail) SetAwardList(v string) {
 func (o *Mail) Delete() {
 	if o.detached {
 		dbctx.PanicDetached(o)
+	}
+	if o.foreign {
+		dbctx.PanicForeign(o)
 	}
 	if o.loaded {
 		o.deleted = true
@@ -167,6 +192,12 @@ func (o *Mail) Detach() {
 	}
 }
 
+// 以下实现 dbctx.Owned。
+
+func (o *Mail) LockKey() (string, int64) { return "uid", o.uid }
+
+func (o *Mail) MarkForeign() { o.foreign = true }
+
 func (o *Mail) DirtyColumns() uint64 {
 	if !o.loaded || o.deleted {
 		return 0
@@ -179,11 +210,11 @@ func (o *Mail) FlushStmt() (string, []any) {
 	case !o.loaded:
 		return "", nil
 	case o.deleted:
-		return "DELETE FROM \"user_mail\" WHERE \"id\" = $1", []any{o.id}
+		return "DELETE FROM \"public\".\"user_mail\" WHERE \"id\" = $1", []any{o.id}
 	case o.dirty == 0:
 		return "", nil
 	}
-	return dbctx.UpdateStmt("\"user_mail\"", "\"id\"", o.id, updateColumnsMail, o.dirty,
+	return dbctx.UpdateStmt("\"public\".\"user_mail\"", "\"id\"", o.id, updateColumnsMail, o.dirty,
 		o.uid,
 		o.confId,
 		o.state,
@@ -209,7 +240,7 @@ func scanMail(s dbctx.Scanner) (*Mail, error) {
 }
 
 func (t mail) queryId(ctx context.Context, q dbctx.Querier, id int64) *Mail {
-	const query = "SELECT " + selectColumnsMail + " FROM \"user_mail\" WHERE \"id\" = $1"
+	const query = "SELECT " + selectColumnsMail + " FROM \"public\".\"user_mail\" WHERE \"id\" = $1"
 	return dbctx.QueryOne(ctx, q, query, scanMail, id)
 }
 
@@ -226,7 +257,7 @@ func (t mail) SelectById(ctx context.Context, id int64) *Mail {
 
 func (t mail) queryUidConfId(ctx context.Context, q dbctx.Querier, uid int64, confId int32) []*Mail {
 	dbctx.CheckPredicate(ctx, "user_mail", dirtyMailUid|dirtyMailConfId)
-	const query = "SELECT " + selectColumnsMail + " FROM \"user_mail\" WHERE \"uid\" = $1 AND \"conf_id\" = $2"
+	const query = "SELECT " + selectColumnsMail + " FROM \"public\".\"user_mail\" WHERE \"uid\" = $1 AND \"conf_id\" = $2"
 	return dbctx.QueryList(ctx, q, query, scanMail, uid, confId)
 }
 
@@ -248,7 +279,7 @@ func (t mail) DeleteById(ctx context.Context, id int64) bool {
 	return true
 }
 
-const selectAllMail = "SELECT " + selectColumnsMail + " FROM \"user_mail\""
+const selectAllMail = "SELECT " + selectColumnsMail + " FROM \"public\".\"user_mail\""
 
 func (t mail) GetAll(ctx context.Context) []*Mail {
 	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx), selectAllMail, scanMail)
@@ -265,17 +296,15 @@ func (t mail) Insert(ctx context.Context, o *Mail) {
 	}
 	tx := dbctx.SQLTxFromCtx(ctx)
 	dbctx.GetOrAddCachedRecord(ctx, o) // 主键还是 0：只登记快照，回滚时恢复成插入前的样子
-	const query = "INSERT INTO \"user_mail\" (\"uid\", \"conf_id\", \"state\", \"receive_at\", \"params\", \"award_list\") VALUES ($1, $2, $3, $4, $5, $6) RETURNING \"id\""
-	if err := tx.QueryRow(ctx, query,
+	const query = "INSERT INTO \"public\".\"user_mail\" (\"uid\", \"conf_id\", \"state\", \"receive_at\", \"params\", \"award_list\") VALUES ($1, $2, $3, $4, $5, $6) RETURNING \"id\""
+	dbctx.InsertReturning(ctx, tx, query, &o.id,
 		o.uid,
 		o.confId,
 		o.state,
 		o.receiveAt,
 		o.params,
 		o.awardList,
-	).Scan(&o.id); err != nil {
-		panic(err)
-	}
+	)
 	o.loaded, o.dirty = true, 0
 	dbctx.GetOrAddCachedRecord(ctx, o) // 主键回填后进身份表
 }

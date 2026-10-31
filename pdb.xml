@@ -62,7 +62,9 @@
         <variable name="awardList" type="string"/> json
     </bean>
 
-    <table name="user_mail" bean="Mail">
+    <!-- lock="uid"：每一行由 key 等于 uid 的咨询锁保护，修改要在 ProcedureOptions{Lock: AdvisoryLock(uid)}
+         （或 TryAdvisoryLock(uid)）的事务里，否则 SetXxx / Delete panic。见 docs/design.md 2.8 -->
+    <table name="user_mail" bean="Mail" lock="uid">
         <primaryKey variable="id" autoIncrement="true"/>
         <index variable="uid,confId" unique="false"/>
     </table>

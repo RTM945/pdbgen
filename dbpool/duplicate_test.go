@@ -50,11 +50,28 @@ func setupTestDB(t *testing.T) {
 	if testInitErr != nil {
 		skip("跳过集成测试，初始化失败: %v", testInitErr)
 	}
-	// 注意这里的 dbpool 是包内那个池变量（包级 var dbpool *pgxpool.Pool），
-	// dbpool.Ping 是 (*pgxpool.Pool).Ping 的方法值，不是包级函数。
-	if err := dbpool.Ping(ctx); err != nil {
+	if err := active.Load().pool.Ping(ctx); err != nil {
 		skip("跳过集成测试，连不上 pdb.xml 里的数据库（需要 README 里的 docker 环境）: %v", err)
 	}
+}
+
+// reopen 换一套配置重新打开连接池（在 pdb.xml 的配置上改），测试结束时换回 pdb.xml 的配置。
+func reopen(t *testing.T, change func(*Config)) {
+	t.Helper()
+	setupTestDB(t)
+
+	cfg := SchemaConfig(testSchema)
+	change(&cfg)
+	Close()
+	if err := Open(context.Background(), cfg); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		Close()
+		if err := Init(context.Background(), testSchema); err != nil {
+			t.Errorf("换回 pdb.xml 的配置失败: %v", err)
+		}
+	})
 }
 
 // catchPanic 跑 fn 并返回 panic 的内容，没 panic 就返回空串。

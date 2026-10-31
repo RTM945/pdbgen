@@ -1,77 +1,96 @@
 package readxml
 
 import (
-	"encoding/xml"
 	"fmt"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
 )
 
+// Schema 是 pdb.xml：根元素 <pdb> 上是生成参数和运行时参数，下面是 <bean> 和 <table>。
+// 由 LoadSchema 读出；属性名见 parse.go 里各元素的属性表。
 type Schema struct {
-	XMLName      xml.Name `xml:"pdb"`
-	URL          string   `xml:"url,attr"`
-	GenOutput    string   `xml:"genOutput,attr"`
-	Schema       string   `xml:"schema,attr"`
-	Package      string   `xml:"package,attr"`
-	PoolMaxConns int32    `xml:"poolMaxConns,attr"`
-	PoolMinConns int32    `xml:"poolMinConns,attr"`
+	File string // 读的是哪个文件，报错时用
 
-	PoolMaxConnLifetime   int `xml:"poolMaxConnLifetime,attr"`
-	PoolMaxConnIdleTime   int `xml:"poolMaxConnIdleTime,attr"`
-	PoolHealthCheckPeriod int `xml:"poolHealthCheckPeriod,attr"`
+	URL       string
+	GenOutput string
+	Schema    string
+	Package   string
 
-	StatementTimeoutMs                int `xml:"statementTimeoutMs,attr"`
-	IdleInTransactionSessionTimeoutMs int `xml:"idleInTransactionSessionTimeoutMs,attr"`
-	LockTimeoutMs                     int `xml:"lockTimeoutMs,attr"`
+	PoolMaxConns int32
+	PoolMinConns int32
+
+	// 以秒为单位
+	PoolMaxConnLifetime   int
+	PoolMaxConnIdleTime   int
+	PoolHealthCheckPeriod int
+
+	StatementTimeoutMs                int
+	IdleInTransactionSessionTimeoutMs int
+	LockTimeoutMs                     int
 
 	// TransactionTimeoutMs 一次 Procedure（BEGIN 到 COMMIT）或 dbpool.Query 回调的客户端总时长上限。
 	// statement_timeout 只管单条语句，管不住"很多条语句加起来很慢"；
 	// PG 17 之前也没有事务级的 GUC，所以只能在客户端这边包一层。
-	TransactionTimeoutMs int `xml:"transactionTimeoutMs,attr"`
+	TransactionTimeoutMs int
 
-	ShowSQL bool `xml:"showSQL,attr"`
+	// CommitTimeoutMs 等 COMMIT / ROLLBACK 结果的上限，0 表示用默认值（dbpool.Config.CommitTimeout）。
+	CommitTimeoutMs int
 
-	AppName string `xml:"appName,attr"`
+	ShowSQL bool
 
-	Beans  []Bean  `xml:"bean"`
-	Tables []Table `xml:"table"`
+	AppName string
+
+	Beans  []Bean
+	Tables []Table
 }
 
 type Bean struct {
-	Name      string     `xml:"name,attr"`
-	Variables []Variable `xml:"variable"`
+	Name      string
+	Variables []Variable
+	Line      int
 }
 
 type Variable struct {
-	Name string `xml:"name,attr"`
-	Type string `xml:"type,attr"`
+	Name string
+	Type string
+	Line int
 }
 
 type Table struct {
-	Name       string      `xml:"name,attr"`
-	Bean       string      `xml:"bean,attr"`
-	PrimaryKey *PrimaryKey `xml:"primaryKey"`
-	Indexes    []Index     `xml:"index"`
+	Name string
+	Bean string
+	// Lock 是保护每一行的锁所在的列（bean 里的 int64 变量，比如 uid）：行的修改要持有
+	// key 等于这一列的值的 bigint 咨询锁，没持有时这一行只读。空表示不检查。见 docs/design.md 2.8。
+	Lock       string
+	PrimaryKey *PrimaryKey
+	Indexes    []Index
+	Line       int
 }
 
 type PrimaryKey struct {
-	Variable      string `xml:"variable,attr"`
-	AutoIncrement bool   `xml:"autoIncrement,attr"`
-	Start         int64  `xml:"start,attr"`
-	Step          int64  `xml:"step,attr"`
+	Variable      string
+	AutoIncrement bool
+	Start         int64
+	Step          int64
+	// Name 是主键约束的名字，空表示 pk_<表名>_<列名>。只有 genddl 用。
+	Name string
+	Line int
 }
 
 type Index struct {
-	Variable string `xml:"variable,attr"`
-	Unique   bool   `xml:"unique,attr"`
+	Variable string
+	Unique   bool
 	// Where 非空就是部分索引（CREATE INDEX ... WHERE）：逗号分隔的 变量=常量，之间是 AND，见 ParseWhere。
 	// 这时 Variable 可以为空（索引建在主键上，查询没有参数）。
-	Where string `xml:"where,attr"`
+	Where string
 	// Method 是部分索引生成的方法名：List<Method> / SelectList<Method>，unique 时 Get<Method> / Select<Method>。
 	// 只用于部分索引，必填；普通索引的方法名由列名拼出。
-	Method string `xml:"method,attr"`
+	Method string
+	// Name 是索引的名字，空表示 idx_<表名>_<列名>（部分索引是 idx_<表名>_where_<method>）。只有 genddl 用：
+	// 拼出来的名字超过 PostgreSQL 的 63 字节时，用它起一个短的。
+	Name string
+	Line int
 }
 
 // Condition 是部分索引 where 里的一个条件：列 = 常量。
@@ -228,23 +247,4 @@ func FindBean(schema *Schema, name string) (*Bean, error) {
 	}
 
 	return nil, fmt.Errorf("bean %q not found", name)
-}
-
-func LoadSchema(filename string) (*Schema, error) {
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return nil, err
-	}
-
-	var schema Schema
-
-	if err := xml.Unmarshal(data, &schema); err != nil {
-		return nil, err
-	}
-
-	if schema.Package == "" {
-		schema.Package = "ptable"
-	}
-
-	return &schema, nil
 }
