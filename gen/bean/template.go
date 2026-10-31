@@ -7,7 +7,7 @@ package {{ .Package }}
 import (
 	"context"
 
-	"pdbgen/dbctx"
+	"{{ .DBCtx }}"
 )
 
 var {{ .TableAccessor }} {{ .ReceiverName }}
@@ -22,8 +22,16 @@ type {{ .TypeName }} struct {
 	loaded   bool   // 对应数据库里的一行：查出来的，或者 Insert 过的
 	deleted  bool   // 标记了删除，提交前 flush 成 DELETE
 	detached bool   // 脱离了事务：SetXxx / Delete 会 panic
+{{- if .Lock }}
+	foreign  bool   // 当前事务没有持有保护这一行的锁（{{ .Lock.Name }} 的值）：SetXxx / Delete 会 panic
+{{- end }}
 	dirty    uint64 // 改过、还没落库的列，第 i 位对应 updateColumns{{ .TypeName }}[i]
 }
+{{- if .Lock }}
+
+// {{ .TypeName }} 的每一行由 key 等于 {{ .Lock.Name }} 的 bigint 咨询锁保护（pdb.xml 的 lock），修改要持有它。
+var _ dbctx.Owned = (*{{ .TypeName }})(nil)
+{{- end }}
 
 const (
 {{- range $i, $f := .UpdateFields }}
@@ -55,6 +63,11 @@ func (o *{{ $.TypeName }}) Set{{ .MethodName }}(v {{ .GoType }}) {
 	if o.detached {
 		dbctx.PanicDetached(o)
 	}
+{{- if $.Lock }}
+	if o.foreign {
+		dbctx.PanicForeign(o)
+	}
+{{- end }}
 	if o.{{ .Name }} != v {
 		o.{{ .Name }} = v
 		o.dirty |= dirty{{ $.TypeName }}{{ .MethodName }}
@@ -66,6 +79,11 @@ func (o *{{ .TypeName }}) Delete() {
 	if o.detached {
 		dbctx.PanicDetached(o)
 	}
+{{- if .Lock }}
+	if o.foreign {
+		dbctx.PanicForeign(o)
+	}
+{{- end }}
 	if o.loaded {
 		o.deleted = true
 	}
@@ -88,6 +106,14 @@ func (o *{{ .TypeName }}) Detach() {
 		o.detached = true
 	}
 }
+{{- if .Lock }}
+
+// 以下实现 dbctx.Owned。
+
+func (o *{{ .TypeName }}) LockKey() (string, int64) { return "{{ .Lock.Name }}", o.{{ .Lock.Name }} }
+
+func (o *{{ .TypeName }}) MarkForeign() { o.foreign = true }
+{{- end }}
 
 func (o *{{ .TypeName }}) DirtyColumns() uint64 {
 	if !o.loaded || o.deleted {
@@ -101,11 +127,11 @@ func (o *{{ .TypeName }}) FlushStmt() (string, []any) {
 	case !o.loaded:
 		return "", nil
 	case o.deleted:
-		return "DELETE FROM {{ quote .TableName }} WHERE {{ .PK.Column }} = $1", []any{o.{{ .PK.Name }}}
+		return "DELETE FROM {{ .SQLTable }} WHERE {{ .PK.Column }} = $1", []any{o.{{ .PK.Name }}}
 	case o.dirty == 0:
 		return "", nil
 	}
-	return dbctx.UpdateStmt("{{ quote .TableName }}", "{{ .PK.Column }}", o.{{ .PK.Name }}, updateColumns{{ .TypeName }}, o.dirty,
+	return dbctx.UpdateStmt("{{ .SQLTable }}", "{{ .PK.Column }}", o.{{ .PK.Name }}, updateColumns{{ .TypeName }}, o.dirty,
 {{- range .UpdateFields }}
 		o.{{ .Name }},
 {{- end }}
@@ -131,7 +157,7 @@ func (t {{ $.ReceiverName }}) {{ .Func }}(ctx context.Context, q dbctx.Querier{{
 {{- if .Columns }}
 	dbctx.CheckPredicate(ctx, "{{ $.TableName }}", {{ .Columns }})
 {{- end }}
-	const query = "SELECT " + selectColumns{{ $.TypeName }} + " FROM {{ quote $.TableName }} WHERE {{ .Where }}"
+	const query = "SELECT " + selectColumns{{ $.TypeName }} + " FROM {{ $.SQLTable }} WHERE {{ .Where }}"
 	return dbctx.Query{{ if .IsList }}List{{ else }}One{{ end }}(ctx, q, query, scan{{ $.TypeName }}{{ if .Args }}, {{ .Args }}{{ end }})
 }
 {{ if .IsList }}
@@ -167,7 +193,7 @@ func (t {{ .ReceiverName }}) DeleteBy{{ .PK.MethodName }}(ctx context.Context, {
 	return true
 }
 
-const selectAll{{ .TypeName }} = "SELECT " + selectColumns{{ .TypeName }} + " FROM {{ quote .TableName }}"
+const selectAll{{ .TypeName }} = "SELECT " + selectColumns{{ .TypeName }} + " FROM {{ .SQLTable }}"
 
 func (t {{ .ReceiverName }}) GetAll(ctx context.Context) []*{{ .TypeName }} {
 	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx), selectAll{{ .TypeName }}, scan{{ .TypeName }})
@@ -184,14 +210,12 @@ func (t {{ .ReceiverName }}) Insert(ctx context.Context, o *{{ .TypeName }}) {
 	}
 	tx := dbctx.SQLTxFromCtx(ctx)
 	dbctx.GetOrAddCachedRecord(ctx, o) // 主键还是 0：只登记快照，回滚时恢复成插入前的样子
-	const query = "INSERT INTO {{ quote .TableName }} ({{ .InsertColumns }}) VALUES ({{ .InsertValues }}) RETURNING {{ .PK.Column }}"
-	if err := tx.QueryRow(ctx, query,
+	const query = "INSERT INTO {{ .SQLTable }} ({{ .InsertColumns }}) VALUES ({{ .InsertValues }}) RETURNING {{ .PK.Column }}"
+	dbctx.InsertReturning(ctx, tx, query, &o.{{ .PK.Name }},
 {{- range .UpdateFields }}
 		o.{{ .Name }},
 {{- end }}
-	).Scan(&o.{{ .PK.Name }}); err != nil {
-		panic(err)
-	}
+	)
 	o.loaded, o.dirty = true, 0
 	dbctx.GetOrAddCachedRecord(ctx, o) // 主键回填后进身份表
 }

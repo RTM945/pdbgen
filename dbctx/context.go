@@ -58,6 +58,19 @@ type Flusher interface {
 	Detach()
 }
 
+// Owned 是 pdb.xml 里声明了 lock 的表生成的实体：每一行由 key 等于 lock 列的值的 bigint 咨询锁保护。
+// 事务登记从库里查出来的行时，没有持有这把锁就调用 MarkForeign，这一行在本事务里只读：
+// 不持锁去改，和持锁的请求并发时，后提交的 UPDATE 会用绝对值覆盖先提交的（丢更新）。
+type Owned interface {
+	Flusher
+
+	// LockKey 返回 lock 列的名字和这一行的值，也就是保护这一行的那把锁的 key。
+	LockKey() (column string, key int64)
+
+	// MarkForeign 标记这一行不受当前事务持有的锁保护：之后 SetXxx / Delete 会 panic（PanicForeign）。
+	MarkForeign()
+}
+
 // Transaction 是一次业务事务的工作集：SQL 事务、身份表、提交/回滚后任务。
 // 由 dbpool.Procedure 创建并放进 ctx，Procedure 结束即失效。
 type Transaction interface {
@@ -169,8 +182,44 @@ func GetOrAddCachedRecord[T Flusher](ctx context.Context, obj T) T {
 	return obj
 }
 
+// abort 是生成代码把 SQL 错误（连接断开、超时、约束冲突……）送到事务边界的方式：
+// dbpool.Procedure / dbpool.Query 接住它，回滚后把里面的 error 当返回值交给调用方。
+// 业务代码里不用逐个检查 SQL 错误，调用方也拿得到 error（errors.Is / errors.As 照常可用）。
+// 误用（脱离事务、事务外调用、改了条件列再查）不是 abort，照旧 panic。
+type abort struct{ err error }
+
+func (a *abort) Error() string { return a.err.Error() }
+func (a *abort) Unwrap() error { return a.err }
+
+// AbortError 返回 recover 到的 r 里的 SQL 错误；r 不是 abort（业务 panic、误用、nil）时返回 nil。
+// 只给 dbpool 的事务边界用。
+func AbortError(r any) error {
+	if a, ok := r.(*abort); ok {
+		return a.err
+	}
+	return nil
+}
+
+// fail 以 err 结束当前的 Procedure / Query，错误里带上出错的语句（缩写，见 summary）。
+func fail(query string, err error) {
+	panic(&abort{fmt.Errorf("pdbgen: %s: %w", summary(query), err)})
+}
+
+// summary 把生成的语句缩成错误信息里看得懂的样子：SELECT 的列清单换成 ...，INSERT 只留表名。
+func summary(query string) string {
+	if rest, ok := strings.CutPrefix(query, "SELECT "); ok {
+		if _, from, ok := strings.Cut(rest, " FROM "); ok {
+			return "SELECT ... FROM " + from
+		}
+	}
+	if head, _, ok := strings.Cut(query, " ("); ok && strings.HasPrefix(head, "INSERT INTO ") {
+		return head
+	}
+	return query
+}
+
 // QueryOne 是单行查询的公共实现：查不到返回零值；查到的行解析成事务里的规范记录，
-// 本事务标记了删除的行当作查不到。
+// 本事务标记了删除的行当作查不到。SQL 出错时结束当前的 Procedure / Query（见 abort）。
 func QueryOne[T Flusher](ctx context.Context, q Querier, query string, scan func(Scanner) (T, error), args ...any) T {
 	var zero T
 	obj, err := scan(q.QueryRow(ctx, query, args...))
@@ -178,7 +227,7 @@ func QueryOne[T Flusher](ctx context.Context, q Querier, query string, scan func
 		return zero
 	}
 	if err != nil {
-		panic(err)
+		fail(query, err)
 	}
 	if obj = GetOrAddCachedRecord(ctx, obj); obj.IsDeleted() {
 		return zero
@@ -190,7 +239,7 @@ func QueryOne[T Flusher](ctx context.Context, q Querier, query string, scan func
 func QueryList[T Flusher](ctx context.Context, q Querier, query string, scan func(Scanner) (T, error), args ...any) []T {
 	rows, err := q.Query(ctx, query, args...)
 	if err != nil {
-		panic(err)
+		fail(query, err)
 	}
 	defer rows.Close()
 
@@ -198,16 +247,24 @@ func QueryList[T Flusher](ctx context.Context, q Querier, query string, scan fun
 	for rows.Next() {
 		obj, err := scan(rows)
 		if err != nil {
-			panic(err)
+			fail(query, err)
 		}
 		if obj = GetOrAddCachedRecord(ctx, obj); !obj.IsDeleted() {
 			result = append(result, obj)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		panic(err)
+		fail(query, err)
 	}
 	return result
+}
+
+// InsertReturning 执行生成代码的 INSERT ... RETURNING <主键>，把主键写进 id。
+// SQL 出错（比如撞了唯一索引）时结束当前的 Procedure（见 abort）。
+func InsertReturning(ctx context.Context, tx SQLTx, query string, id *int64, args ...any) {
+	if err := tx.QueryRow(ctx, query, args...).Scan(id); err != nil {
+		fail(query, err)
+	}
 }
 
 // CheckPredicate 是事务里条件查询的守卫：table 表有记录在 columns 这些列上改了、还没落库时 panic。
@@ -235,6 +292,18 @@ func PanicDetached(rec Flusher) {
 		"pdbgen: %s id=%d 已脱离事务（在事务外查出来的，或者所属事务已经结束），改了也不会落库；"+
 			"请在 dbpool.Procedure 里用 GetByXxx 重新查询后再改",
 		rec.TableName(), rec.Identity(),
+	))
+}
+
+// PanicForeign 是生成代码 SetXxx / Delete 的守卫：这一行由一把当前事务没有持有的锁保护（见 Owned）。
+func PanicForeign(rec Owned) {
+	col, key := rec.LockKey()
+	panic(fmt.Sprintf(
+		"pdbgen: %s id=%d 由 %s=%d 的锁保护，当前事务没有持有这把锁，不能改它："+
+			"和持锁的请求并发时，后提交的 UPDATE 会覆盖先提交的（丢更新）。"+
+			"请在持有这把锁的 Procedure 里改（ProcedureOptions{Lock: dbpool.AdvisoryLock(%d)}，"+
+			"同时改几个玩家的就把几个 key 都写上）",
+		rec.TableName(), rec.Identity(), col, key, key,
 	))
 }
 

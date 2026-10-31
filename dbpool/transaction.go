@@ -3,7 +3,6 @@ package dbpool
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"runtime/debug"
 	"time"
 
@@ -21,7 +20,12 @@ type recordKey struct {
 
 // transaction 实现 dbctx.Transaction：一次 Procedure 的工作集。
 type transaction struct {
-	tx dbctx.SQLTx
+	tx     dbctx.SQLTx
+	logSQL bool // Config.ShowSQL：flush 的 Batch 记一条日志
+
+	// 持有的 bigint 咨询锁（ProcedureOptions.Lock）：声明了 lock 的表，只有这把锁保护的行可以改
+	lockKey int64
+	locked  bool
 
 	items         []dbctx.Flusher                     // 登记顺序，也是 flush 顺序
 	snapshots     map[dbctx.Flusher]dbctx.RecordState // 第一次登记时的整条快照，回滚用
@@ -61,8 +65,20 @@ func (t *transaction) AddCachedRecord(obj dbctx.Flusher) dbctx.Flusher {
 	if _, ok := t.snapshots[obj]; !ok {
 		t.snapshots[obj] = obj.SnapshotState()
 		t.items = append(t.items, obj)
+		// 第一次登记、主键不是 0：从库里查出来的行（Insert 的对象第一次登记时主键还是 0，
+		// 它是本事务新建的行，没有别的写者）。归一把锁保护、本事务又没持有那把锁的，只读。
+		if o, ok := obj.(dbctx.Owned); ok && obj.Identity() != 0 {
+			if _, key := o.LockKey(); !t.holds(key) {
+				o.MarkForeign()
+			}
+		}
 	}
 	return obj
+}
+
+// holds 报告事务是否持有 key 这把 bigint 咨询锁。
+func (t *transaction) holds(key int64) bool {
+	return t.locked && t.lockKey == key
 }
 
 func (t *transaction) Records() []dbctx.Flusher { return t.items }
@@ -106,7 +122,9 @@ func (t *transaction) flush(ctx context.Context) error {
 	if closeErr := br.Close(); err == nil {
 		err = closeErr
 	}
-	logBatch(start, batch, err)
+	if t.logSQL {
+		logBatch(ctx, start, batch, err)
+	}
 	return err
 }
 
@@ -133,7 +151,7 @@ func runHooks(ctx context.Context, kind string, hooks []func(context.Context)) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					slog.Error("pdbgen: "+kind+" hook panic", "index", i, "panic", r, "stack", string(debug.Stack()))
+					log().ErrorContext(ctx, "pdbgen: "+kind+" hook panic", "index", i, "panic", r, "stack", string(debug.Stack()))
 				}
 			}()
 			fn(ctx)

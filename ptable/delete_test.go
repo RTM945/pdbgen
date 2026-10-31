@@ -38,7 +38,7 @@ func TestRedEnvelopeDeleteFlush(t *testing.T) {
 	}
 
 	stmt, args := v.FlushStmt()
-	if want := `DELETE FROM "user_red_envelope" WHERE "id" = $1`; stmt != want {
+	if want := `DELETE FROM "public"."user_red_envelope" WHERE "id" = $1`; stmt != want {
 		t.Fatalf("DELETE 语句不符，期望 %q，实际 %q", want, stmt)
 	}
 	if len(args) != 1 || args[0] != int64(7) {
@@ -60,7 +60,7 @@ func TestRedEnvelopeUpdateOnlyDirtyColumns(t *testing.T) {
 	v.SetTodayCount(2) // 值没变，不置脏位
 
 	stmt, args := v.FlushStmt()
-	if want := `UPDATE "user_red_envelope" SET "total" = $1 WHERE "id" = $2`; stmt != want {
+	if want := `UPDATE "public"."user_red_envelope" SET "total" = $1 WHERE "id" = $2`; stmt != want {
 		t.Fatalf("UPDATE 语句不符，期望 %q，实际 %q", want, stmt)
 	}
 	if len(args) != 2 || args[0] != int32(4) || args[1] != int64(7) {
@@ -120,4 +120,23 @@ func TestInsertRejectsLoadedRecord(t *testing.T) {
 	mustPanic(t, "Insert 只接受 NewRedEnvelope()", func() {
 		UserRedEnvelopeTable.Insert(context.Background(), loadedRedEnvelope())
 	})
+}
+
+// TestMailForeignIsReadOnly user_mail 声明了 lock="uid"：标记成 foreign 的行可以读，改和删 panic，
+// 而且检查排在值有没有变之前（没持锁时连"写回同样的值"也不行）。
+func TestMailForeignIsReadOnly(t *testing.T) {
+	m := &Mail{id: 9, uid: 100, state: 1, loaded: true}
+	if col, key := m.LockKey(); col != "uid" || key != 100 {
+		t.Fatalf("LockKey 应该是 uid=100，实际 %s=%d", col, key)
+	}
+	m.MarkForeign()
+	if m.State() != 1 {
+		t.Fatal("foreign 的行照样可以读")
+	}
+	mustPanic(t, "由 uid=100 的锁保护", func() { m.SetState(2) })
+	mustPanic(t, "由 uid=100 的锁保护", func() { m.SetState(1) })
+	mustPanic(t, "由 uid=100 的锁保护", m.Delete)
+	if stmt, _ := m.FlushStmt(); stmt != "" {
+		t.Fatalf("没改成功，不应该有语句，实际 %q", stmt)
+	}
 }

@@ -162,11 +162,11 @@ func (o *RedEnvelope) FlushStmt() (string, []any) {
 	case !o.loaded:
 		return "", nil
 	case o.deleted:
-		return "DELETE FROM \"user_red_envelope\" WHERE \"id\" = $1", []any{o.id}
+		return "DELETE FROM \"public\".\"user_red_envelope\" WHERE \"id\" = $1", []any{o.id}
 	case o.dirty == 0:
 		return "", nil
 	}
-	return dbctx.UpdateStmt("\"user_red_envelope\"", "\"id\"", o.id, updateColumnsRedEnvelope, o.dirty,
+	return dbctx.UpdateStmt("\"public\".\"user_red_envelope\"", "\"id\"", o.id, updateColumnsRedEnvelope, o.dirty,
 		o.uid,
 		o.actId,
 		o.lastRefreshAt,
@@ -191,7 +191,7 @@ func scanRedEnvelope(s dbctx.Scanner) (*RedEnvelope, error) {
 }
 
 func (t redEnvelope) queryId(ctx context.Context, q dbctx.Querier, id int64) *RedEnvelope {
-	const query = "SELECT " + selectColumnsRedEnvelope + " FROM \"user_red_envelope\" WHERE \"id\" = $1"
+	const query = "SELECT " + selectColumnsRedEnvelope + " FROM \"public\".\"user_red_envelope\" WHERE \"id\" = $1"
 	return dbctx.QueryOne(ctx, q, query, scanRedEnvelope, id)
 }
 
@@ -208,7 +208,7 @@ func (t redEnvelope) SelectById(ctx context.Context, id int64) *RedEnvelope {
 
 func (t redEnvelope) queryUidActId(ctx context.Context, q dbctx.Querier, uid int64, actId int32) *RedEnvelope {
 	dbctx.CheckPredicate(ctx, "user_red_envelope", dirtyRedEnvelopeUid|dirtyRedEnvelopeActId)
-	const query = "SELECT " + selectColumnsRedEnvelope + " FROM \"user_red_envelope\" WHERE \"uid\" = $1 AND \"act_id\" = $2"
+	const query = "SELECT " + selectColumnsRedEnvelope + " FROM \"public\".\"user_red_envelope\" WHERE \"uid\" = $1 AND \"act_id\" = $2"
 	return dbctx.QueryOne(ctx, q, query, scanRedEnvelope, uid, actId)
 }
 
@@ -230,7 +230,7 @@ func (t redEnvelope) DeleteById(ctx context.Context, id int64) bool {
 	return true
 }
 
-const selectAllRedEnvelope = "SELECT " + selectColumnsRedEnvelope + " FROM \"user_red_envelope\""
+const selectAllRedEnvelope = "SELECT " + selectColumnsRedEnvelope + " FROM \"public\".\"user_red_envelope\""
 
 func (t redEnvelope) GetAll(ctx context.Context) []*RedEnvelope {
 	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx), selectAllRedEnvelope, scanRedEnvelope)
@@ -247,16 +247,14 @@ func (t redEnvelope) Insert(ctx context.Context, o *RedEnvelope) {
 	}
 	tx := dbctx.SQLTxFromCtx(ctx)
 	dbctx.GetOrAddCachedRecord(ctx, o) // 主键还是 0：只登记快照，回滚时恢复成插入前的样子
-	const query = "INSERT INTO \"user_red_envelope\" (\"uid\", \"act_id\", \"last_refresh_at\", \"today_count\", \"total\") VALUES ($1, $2, $3, $4, $5) RETURNING \"id\""
-	if err := tx.QueryRow(ctx, query,
+	const query = "INSERT INTO \"public\".\"user_red_envelope\" (\"uid\", \"act_id\", \"last_refresh_at\", \"today_count\", \"total\") VALUES ($1, $2, $3, $4, $5) RETURNING \"id\""
+	dbctx.InsertReturning(ctx, tx, query, &o.id,
 		o.uid,
 		o.actId,
 		o.lastRefreshAt,
 		o.todayCount,
 		o.total,
-	).Scan(&o.id); err != nil {
-		panic(err)
-	}
+	)
 	o.loaded, o.dirty = true, 0
 	dbctx.GetOrAddCachedRecord(ctx, o) // 主键回填后进身份表
 }

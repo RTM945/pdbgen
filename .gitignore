@@ -1,0 +1,5 @@
+# 生成器用 go run / go tool 运行，不提交编出来的程序
+*.exe
+
+# IDE 的本地配置（.idea/dataSources.xml 里有连接串）
+.idea/

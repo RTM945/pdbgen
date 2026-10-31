@@ -16,7 +16,12 @@ func TestBuildBeginSQL(t *testing.T) {
 		t.Fatalf("没配超时时只有 BEGIN，实际 %q", got)
 	}
 	want := "BEGIN; SET LOCAL statement_timeout = 5000; SET LOCAL lock_timeout = 1000"
-	if got := buildBeginSQL(5000, 0, 1000); got != want {
+	if got := buildBeginSQL(5*time.Second, 0, time.Second); got != want {
+		t.Fatalf("期望 %q，实际 %q", want, got)
+	}
+	// 不足 1ms 的超时向上取整：PostgreSQL 里 0 表示不限
+	want = "BEGIN; SET LOCAL idle_in_transaction_session_timeout = 1"
+	if got := buildBeginSQL(0, 300*time.Microsecond, 0); got != want {
 		t.Fatalf("期望 %q，实际 %q", want, got)
 	}
 }
@@ -55,11 +60,7 @@ func TestTimeoutsApplyToEveryTransaction(t *testing.T) {
 
 // TestStatementTimeoutAppliesWithoutLock 不加锁的事务里，慢语句同样会被服务端的 statement_timeout 取消。
 func TestStatementTimeoutAppliesWithoutLock(t *testing.T) {
-	setupTestDB(t)
-
-	old := beginSQL
-	beginSQL = buildBeginSQL(50, 0, 0)
-	t.Cleanup(func() { beginSQL = old })
+	reopen(t, func(c *Config) { c.StatementTimeout = 50 * time.Millisecond })
 
 	err := WithTx(t.Context(), func(ctx context.Context) error {
 		_, err := dbctx.SQLTxFromCtx(ctx).Exec(ctx, "SELECT pg_sleep(1)")
@@ -72,9 +73,7 @@ func TestStatementTimeoutAppliesWithoutLock(t *testing.T) {
 
 // TestQueryHasBudget dbpool.Query 的回调也受 transactionTimeoutMs 的预算限制。
 func TestQueryHasBudget(t *testing.T) {
-	old := budget
-	budget = time.Second
-	t.Cleanup(func() { budget = old })
+	reopen(t, func(c *Config) { c.TransactionTimeout = time.Second })
 
 	var deadline time.Time
 	var ok bool
@@ -86,5 +85,17 @@ func TestQueryHasBudget(t *testing.T) {
 	}
 	if !ok || time.Until(deadline) > time.Second {
 		t.Fatalf("Query 的 ctx 应该带 1s 以内的 deadline，实际 ok=%v deadline=%v", ok, deadline)
+	}
+}
+
+func TestEarliest(t *testing.T) {
+	for _, tc := range []struct{ a, b, want time.Duration }{
+		{0, 0, 0}, {time.Second, 0, time.Second}, {0, time.Second, time.Second},
+		{time.Second, 2 * time.Second, time.Second}, {3 * time.Second, 2 * time.Second, 2 * time.Second},
+		{-1, time.Second, time.Second},
+	} {
+		if got := earliest(tc.a, tc.b); got != tc.want {
+			t.Errorf("earliest(%v, %v) = %v，期望 %v", tc.a, tc.b, got, tc.want)
+		}
 	}
 }

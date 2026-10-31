@@ -2,8 +2,12 @@ package dbctx
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type testRecord struct {
@@ -183,5 +187,93 @@ func TestUpdateStmt(t *testing.T) {
 	}
 	if len(args) != 3 || args[0] != "x" || args[1] != "s" || args[2] != int64(7) {
 		t.Fatalf("参数不符，实际 %#v", args)
+	}
+}
+
+// failingQuerier 的每条查询都失败，用来验证查询出错时走 abort。
+type failingQuerier struct{ err error }
+
+func (q failingQuerier) QueryRow(context.Context, string, ...any) pgx.Row { return errRow{q.err} }
+func (q failingQuerier) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return nil, q.err
+}
+func (q failingQuerier) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, q.err
+}
+func (q failingQuerier) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults { return nil }
+
+type errRow struct{ err error }
+
+func (r errRow) Scan(...any) error { return r.err }
+
+// abortOf 跑 fn，返回它以 abort 结束时带出来的错误；没有 panic 或者 panic 的不是 abort 时测试失败。
+func abortOf(t *testing.T, fn func()) (err error) {
+	t.Helper()
+	defer func() {
+		t.Helper()
+		r := recover()
+		if err = AbortError(r); err == nil {
+			t.Fatalf("应该以 abort 结束，实际 panic: %v", r)
+		}
+	}()
+	fn()
+	return nil
+}
+
+func scanTestRecord(s Scanner) (*testRecord, error) {
+	r := &testRecord{table: "t"}
+	return r, s.Scan(&r.id)
+}
+
+// TestQueryErrorsAbort 查询出错时以 abort 结束，错误里带着原错误和缩写的语句。
+func TestQueryErrorsAbort(t *testing.T) {
+	boom := errors.New("boom")
+	q := failingQuerier{boom}
+	const query = `SELECT "id", "a", "b" FROM "t" WHERE "a" = $1`
+
+	for name, fn := range map[string]func(){
+		"QueryOne":  func() { QueryOne(context.Background(), q, query, scanTestRecord, 1) },
+		"QueryList": func() { QueryList(context.Background(), q, query, scanTestRecord, 1) },
+		"InsertReturning": func() {
+			InsertReturning(context.Background(), q, `INSERT INTO "t" ("a") VALUES ($1) RETURNING "id"`, new(int64), 1)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := abortOf(t, fn)
+			if !errors.Is(err, boom) {
+				t.Fatalf("abort 里应该带着原错误，实际: %v", err)
+			}
+			if !strings.HasPrefix(err.Error(), "pdbgen: ") || strings.Contains(err.Error(), `"a", "b"`) {
+				t.Fatalf("错误应该带缩写的语句，实际: %v", err)
+			}
+		})
+	}
+}
+
+// TestQueryOneNoRowsIsNotAnError 查不到返回零值，不是错误。
+func TestQueryOneNoRowsIsNotAnError(t *testing.T) {
+	if got := QueryOne(context.Background(), failingQuerier{pgx.ErrNoRows}, "SELECT 1", scanTestRecord); got != nil {
+		t.Fatalf("查不到应该返回 nil，实际 %v", got)
+	}
+}
+
+// TestAbortErrorIgnoresOtherPanics 只有 abort 才转成返回值：业务 panic、误用的 panic 照旧上抛。
+func TestAbortErrorIgnoresOtherPanics(t *testing.T) {
+	for _, r := range []any{nil, "boom", errors.New("plain error"), &testRecord{}} {
+		if err := AbortError(r); err != nil {
+			t.Fatalf("%v 不是 abort，实际取出了 %v", r, err)
+		}
+	}
+}
+
+func TestSummary(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{`SELECT "id", "uid" FROM "user_mail" WHERE "uid" = $1`, `SELECT ... FROM "user_mail" WHERE "uid" = $1`},
+		{`INSERT INTO "user_mail" ("uid") VALUES ($1) RETURNING "id"`, `INSERT INTO "user_mail"`},
+		{`DELETE FROM "t" WHERE "id" = $1`, `DELETE FROM "t" WHERE "id" = $1`},
+	} {
+		if got := summary(tc.in); got != tc.want {
+			t.Errorf("summary(%q)\n期望 %s\n实际 %s", tc.in, tc.want, got)
+		}
 	}
 }
