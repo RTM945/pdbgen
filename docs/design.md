@@ -107,7 +107,7 @@ b.SetTotal(42)
 
 `fn` 里调用 `runtime.Goexit`（测试里的 `t.Fatal` / `t.FailNow` 就是它）同样回滚，AfterRollback 照常执行。
 
-业务自己用 `dbctx.SQLTxFromCtx(ctx)` 执行的 SQL 照常返回 error，由业务决定怎么处理。
+业务自己用 `dbctx.SQLTxFromCtx(ctx, ptable.DBName)` 执行的 SQL 照常返回 error，由业务决定怎么处理。
 
 ### 2.5 `GetXxx` 与 `SelectXxx` 互斥
 
@@ -171,7 +171,9 @@ b.SetTotal(42)
 
 ## 3. 事务、锁与超时
 
-连接池是进程级的：`dbpool.Open(ctx, Config)` 打开，`dbpool.Init(ctx, schema)` 是用 `pdb.xml` 根元素上的参数打开（`Open(ctx, SchemaConfig(schema))`），`dbpool.Close()` 关掉。同一时刻只有一个打开的连接池，再 `Open` 返回 `ErrAlreadyOpen`；没打开时 `Procedure` / `Query` 返回 `ErrNotOpen`。`Close` 之后可以再 `Open`。
+包级函数用的是默认句柄：`dbpool.Open(ctx, Config)` 打开，`dbpool.Init(ctx, schema)` 是用 `pdb.xml` 根元素上的参数打开（`Open(ctx, SchemaConfig(schema))`），`dbpool.Close()` 关掉。同一时刻只有一个默认句柄，再 `Open` 返回 `ErrAlreadyOpen`；没打开时 `Procedure` / `Query` 返回 `ErrNotOpen`。`Close` 之后可以再 `Open`。
+
+- **再连别的库**：`dbpool.New(ctx, Config) (*DB, error)` 开一个句柄，`DB` 的 `Procedure` / `WithTx` / `Query` / `Close` / `Stats` 和包级函数一样，各用各的连接池和参数。每个 `pdb.xml` 写一个不同的 `name`（只连一个库可以不写），`Config.Name` 取它；生成器把它生成成包里的常量 `DBName`（文件 `pdb.pdb.go`）。事务和 `Query` 放进 ctx 的连接池都记着自己是哪个库开的，`dbctx.SQLTxFromCtx(ctx, db)` / `QuerierFromCtx(ctx, db)` 按库名取，对不上直接 panic（误用，见 2.7）：否则在 A 库的事务里查 B 库的表，SQL 会发到 A 库上，到运行时才报"表不存在"，同名的表还会读写错。生成的 `GetById` 先取事务、再查缓存，同理。不同库的事务不能嵌套（`ErrNestedTransaction`），也不会一起提交。
 
 - **零值用默认值**：`Config`（以及 `pdb.xml`）里没写的连接池参数沿用 pgx 的默认值（连接串里的 `pool_max_conns` 等参数照常生效），只有写了的才覆盖。负数、`MinConns` 大于 `MaxConns` 时 `Open` 报错。以前没写的属性被当成 0 覆盖上去：`poolHealthCheckPeriod` 没写时 pgx 的后台 goroutine 会 panic，整个进程崩掉；`poolMaxConnLifetime` 没写时连接永不过期。
 - `statementTimeoutMs` / `idleInTransactionSessionTimeoutMs` / `lockTimeoutMs` 拼进 BEGIN：`BEGIN; SET LOCAL statement_timeout = ...; ...`。不带参数的 Exec 走简单协议，一次往返发完，所以**每个事务都有这三个超时**，加不加锁都一样，也不多花往返。不足 1ms 的超时按 1ms 下发（PostgreSQL 里 0 表示不限）。
@@ -292,6 +294,15 @@ genddl 的输出包在 `BEGIN; ... COMMIT;` 里（PostgreSQL 的 DDL 是事务�
 - **Procedure 与 Transaction 的职责划分与命名**：[design-procedure-transaction.md](design-procedure-transaction.md)（提案，Phase 1-5 已实施）。实施时并入本文正文，并在变更记录里留痕。
 
 ## 7. 变更记录
+
+### 2026-11-03 一个进程连多个库；连错库当场 panic
+- **改了什么**：
+  - `dbpool`：内部的 `db` 导出成 `DB`，新增 `New`；`Procedure` / `WithTx` / `Query` / `Close` / `Stats` 都有句柄上的版本，包级函数转调默认句柄（`active`，仍是 atomic），签名不变。
+  - `pdb.xml` 根元素新增 `name`；`readxml.Schema.Name`、`Config.Name`；生成器多生成一个 `pdb.pdb.go`（`const DBName`），表名不能叫 `pdb`。
+  - `dbctx.Transaction` 多了 `DBName()`；`WithQuerier(ctx, db, q)`；`SQLTxFromCtx(ctx, db)` / `QuerierFromCtx(ctx, db)` 多了库名参数，对不上时 panic。生成的 `GetById` 先取事务再查缓存。
+- **为什么**：expservergo 要把只追加的日志表放进单独的库，同一个进程连两个库；原来的连接池是进程级单例，再 `Open` 返回 `ErrAlreadyOpen`。生成的代码只从 ctx 里取"当前事务"、不认是哪个库的，在一个库的事务里调另一个库的表，SQL 会悄悄发到错的库上。
+- **影响范围**：`SQLTxFromCtx` / `QuerierFromCtx` 的签名变了，手写 SQL 都要带上 `DBName`（同一个包里直接写 `DBName`，别的包写 `ptable.DBName`），重新生成后不改编不过。只连一个库、`pdb.xml` 不写 `name` 的项目，`DBName` 是空串，行为不变。
+- **验证状态**：`go vet`、`PDBGEN_REQUIRE_DB=1 go test ./...` 通过（本地 PG）。新增 `dbctx.TestWrongDB`、`dbpool.TestSecondHandle`（第二个句柄的事务和查询；在它的事务、查询里碰默认库的表 panic；跨库嵌套返回 `ErrNestedTransaction`）。`-race` 没跑。go_pg_test、`Dev/pdbgen` 还没同步。
 
 ### 2026-11-01 生成器：文件名、重名、过期文件、行号；SQL 带 schema；DDL 包在事务里；不提交 exe
 

@@ -258,7 +258,7 @@ func (hangingTx) Commit(ctx context.Context) error {
 
 // TestCommitIsBounded COMMIT 不受调用方取消和预算的影响，但最多等 CommitTimeout。
 func TestCommitIsBounded(t *testing.T) {
-	d := &db{commitTimeout: 100 * time.Millisecond}
+	d := &DB{commitTimeout: 100 * time.Millisecond}
 
 	start := time.Now()
 	if err := d.commit(t.Context(), hangingTx{}); !errors.Is(err, context.DeadlineExceeded) {

@@ -76,6 +76,9 @@ type Owned interface {
 type Transaction interface {
 	SQLTx() SQLTx
 
+	// DBName 是事务开在哪个库上（dbpool.Config.Name，即 pdb.xml 的 name），SQLTxFromCtx 用它检查连没连错库。
+	DBName() string
+
 	// GetCachedRecord 返回事务里已经缓存的记录（xdb: getCachedTRecord）。
 	GetCachedRecord(table string, id int64) (Flusher, bool)
 
@@ -117,26 +120,44 @@ func mustTransaction(ctx context.Context, what string) Transaction {
 }
 
 // SQLTxFromCtx 返回 ctx 里的 SQL 事务，不在事务里时 panic。
-// GetByXxx / ListByXxx / GetAll / Insert 都经过这里。
-func SQLTxFromCtx(ctx context.Context) SQLTx {
-	return mustTransaction(ctx, "GetByXxx / ListByXxx / GetAll / Insert").SQLTx()
+// GetByXxx / ListByXxx / GetAll / Insert 都经过这里，db 是表所在的库（生成包里的 DBName）：
+// 事务开在别的库上时 panic，否则这条 SQL 会在那个库上执行，到运行时才报"表不存在"，或者读写到同名的表。
+func SQLTxFromCtx(ctx context.Context, db string) SQLTx {
+	txn := mustTransaction(ctx, "GetByXxx / ListByXxx / GetAll / Insert")
+	if txn.DBName() != db {
+		panicWrongDB("事务", txn.DBName(), db)
+	}
+	return txn.SQLTx()
 }
 
-func WithQuerier(ctx context.Context, q Querier) context.Context {
-	return context.WithValue(ctx, querierKey{}, q)
+// querier 是 dbpool.Query 放进 ctx 的连接池和它连的库。
+type querier struct {
+	db string
+	q  Querier
+}
+
+func WithQuerier(ctx context.Context, db string, q Querier) context.Context {
+	return context.WithValue(ctx, querierKey{}, querier{db: db, q: q})
 }
 
 // QuerierFromCtx 返回 dbpool.Query 放进 ctx 的连接池，SelectByXxx / SelectAll 都经过这里。
-// 在事务里调用会 panic：从池里另取一条连接读不到本事务的修改。
-func QuerierFromCtx(ctx context.Context) Querier {
+// 在事务里调用会 panic：从池里另取一条连接读不到本事务的修改。db 的检查同 SQLTxFromCtx。
+func QuerierFromCtx(ctx context.Context, db string) Querier {
 	if InTransaction(ctx) {
 		panic("pdbgen: SelectByXxx / SelectAll 不能在事务里调用，事务里用 GetByXxx / ListByXxx / GetAll")
 	}
-	q, ok := ctx.Value(querierKey{}).(Querier)
+	q, ok := ctx.Value(querierKey{}).(querier)
 	if !ok {
 		panic("pdbgen: SelectByXxx / SelectAll 只能在 dbpool.Query 里调用")
 	}
-	return q
+	if q.db != db {
+		panicWrongDB("查询", q.db, db)
+	}
+	return q.q
+}
+
+func panicWrongDB(what, opened, want string) {
+	panic(fmt.Sprintf("pdbgen: ctx 里的%s开在库 %q 上，要操作的表在库 %q：用那个库的句柄开事务或查询", what, opened, want))
 }
 
 // AfterCommit 注册 COMMIT 明确成功后执行的任务（发包、RPC、事件等外部副作用）。

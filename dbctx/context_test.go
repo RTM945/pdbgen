@@ -38,6 +38,7 @@ type testKey struct {
 }
 
 type testTransaction struct {
+	db      string
 	records map[testKey]Flusher
 	items   []Flusher
 	hooks   int
@@ -52,6 +53,8 @@ func newTestTransaction(recs ...Flusher) *testTransaction {
 }
 
 func (t *testTransaction) SQLTx() SQLTx { return nil }
+
+func (t *testTransaction) DBName() string { return t.db }
 
 func (t *testTransaction) GetCachedRecord(table string, id int64) (Flusher, bool) {
 	rec, ok := t.records[testKey{table: table, id: id}]
@@ -161,7 +164,7 @@ func TestTransactionOnlyHelpers(t *testing.T) {
 	ctx := context.Background()
 	mustPanic(t, "dbctx.AfterCommit", func() { AfterCommit(ctx, func(context.Context) {}) })
 	mustPanic(t, "dbctx.AfterRollback", func() { AfterRollback(ctx, func(context.Context) {}) })
-	mustPanic(t, "dbpool.Procedure", func() { SQLTxFromCtx(ctx) })
+	mustPanic(t, "dbpool.Procedure", func() { SQLTxFromCtx(ctx, "") })
 
 	txn := newTestTransaction()
 	AfterCommit(WithTransaction(ctx, txn), func(context.Context) {})
@@ -173,10 +176,23 @@ func TestTransactionOnlyHelpers(t *testing.T) {
 
 // TestQuerierFromCtx SelectByXxx 只能在 dbpool.Query 里、事务外调用。
 func TestQuerierFromCtx(t *testing.T) {
-	mustPanic(t, "dbpool.Query", func() { QuerierFromCtx(context.Background()) })
+	mustPanic(t, "dbpool.Query", func() { QuerierFromCtx(context.Background(), "") })
 
 	inTx := WithTransaction(context.Background(), newTestTransaction())
-	mustPanic(t, "不能在事务里调用", func() { QuerierFromCtx(inTx) })
+	mustPanic(t, "不能在事务里调用", func() { QuerierFromCtx(inTx, "") })
+}
+
+// TestWrongDB ctx 里的事务、连接池开在别的库上时，按 db 取它直接 panic。
+func TestWrongDB(t *testing.T) {
+	txn := newTestTransaction()
+	txn.db = "game"
+	inTx := WithTransaction(context.Background(), txn)
+	SQLTxFromCtx(inTx, "game")
+	mustPanic(t, `开在库 "game" 上，要操作的表在库 "log"`, func() { SQLTxFromCtx(inTx, "log") })
+
+	inQuery := WithQuerier(context.Background(), "game", nil)
+	QuerierFromCtx(inQuery, "game")
+	mustPanic(t, `开在库 "game" 上，要操作的表在库 "log"`, func() { QuerierFromCtx(inQuery, "log") })
 }
 
 // TestUpdateStmt 只拼脏列，主键是最后一个参数。

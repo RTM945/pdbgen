@@ -21,7 +21,8 @@ type recordKey struct {
 // transaction 实现 dbctx.Transaction：一次 Procedure 的工作集。
 type transaction struct {
 	tx     dbctx.SQLTx
-	logSQL bool // Config.ShowSQL：flush 的 Batch 记一条日志
+	dbName string // Config.Name
+	logSQL bool   // Config.ShowSQL：flush 的 Batch 记一条日志
 
 	// 持有的 bigint 咨询锁（ProcedureOptions.Lock）：声明了 lock 的表，只有这把锁保护的行可以改
 	lockKey int64
@@ -46,6 +47,8 @@ func newTransaction(tx dbctx.SQLTx) *transaction {
 }
 
 func (t *transaction) SQLTx() dbctx.SQLTx { return t.tx }
+
+func (t *transaction) DBName() string { return t.dbName }
 
 func (t *transaction) GetCachedRecord(table string, id int64) (dbctx.Flusher, bool) {
 	rec, ok := t.cachedRecords[recordKey{table, id}]

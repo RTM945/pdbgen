@@ -56,7 +56,7 @@ func cleanupRedEnvelope(t *testing.T, ctx context.Context, uid int64) {
 	t.Helper()
 
 	if err := WithTx(ctx, func(ctx context.Context) error {
-		_, err := dbctx.SQLTxFromCtx(ctx).Exec(
+		_, err := dbctx.SQLTxFromCtx(ctx, ptable.DBName).Exec(
 			ctx, `DELETE FROM user_red_envelope WHERE uid = $1`, uid,
 		)
 		return err
@@ -68,7 +68,7 @@ func cleanupRedEnvelope(t *testing.T, ctx context.Context, uid int64) {
 func countRedEnvelope(ctx context.Context, uid int64) (int, error) {
 	var n int
 	err := Query(ctx, func(ctx context.Context) error {
-		return dbctx.QuerierFromCtx(ctx).QueryRow(
+		return dbctx.QuerierFromCtx(ctx, ptable.DBName).QueryRow(
 			ctx, `SELECT count(*) FROM user_red_envelope WHERE uid = $1`, uid,
 		).Scan(&n)
 	})

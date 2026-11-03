@@ -93,7 +93,7 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL（
 - `transactionTimeoutMs` 是客户端预算，同时管 `Procedure` 和 `dbpool.Query` 回调，超过返回 `ErrTimeout`（调用方自己取消、到期时不带它，见 `overBudget`）。pgx 在 ctx 到期时只断开连接、不发 CancelRequest，服务端靠 `statement_timeout` 停下；`Query` 没有事务，服务端上限要用角色级 `statement_timeout`。COMMIT 用 `context.WithoutCancel(ctx)`：一旦发出去就必须等到结果，避免"不知道到底提交没有"导致重试重复发放；但最多等 `commitTimeoutMs`（默认 30s），等不到返回 `ErrCommitUnknown`，不回滚内存也不跑钩子。
 - 锁用 `ProcedureOptions.Lock` 指定：`TryAdvisoryLock(key)` / `TryAdvisoryLock2(ns, id)` 拿不到返回 `ErrAdvisoryLockNotAcquired`；`AdvisoryLock(key)` / `AdvisoryLock2(ns, id)` 会阻塞等待（受 `lock_timeout` 限制，等超时同样返回 `ErrAdvisoryLockNotAcquired`）。try 锁失败是正常的"玩家忙"信号，业务直接返回稍后再试，不要在请求内退避重试；框架也不自动重试。key 的语义框架不关心，bigint 形式约定只给 uid 用。
 - 这套锁是用来替代 `SELECT ... FOR UPDATE` 做玩家级串行的（README 有说明：玩家请求用 try 版，GM/RPC 写请求用阻塞版，只读请求走非事务的 `Query`）。
-- 连接池是进程级的：`dbpool.Open(ctx, Config)` / `dbpool.Init(ctx, schema)`（= `Open(ctx, SchemaConfig(schema))`）打开，打开后的参数在 `db` 里只读，当前的 `db` 存在 `active`（atomic）。已经打开时再开返回 `ErrAlreadyOpen`。`Config` 的零值字段用 pgx 的默认值，只覆盖写了的。`Close` 必须排在服务优雅关闭**之后**，否则会把在途请求打死在半路；之后可以再 `Open`（测试里的 `reopen` 就是这样换配置的）。`DefaultQueryExecMode` 是 `pgx.QueryExecModeExec`（extended protocol、不缓存 prepared statement），配合 pgBouncer 的 transaction pooling。
+- 包级函数用默认句柄：`dbpool.Open(ctx, Config)` / `dbpool.Init(ctx, schema)`（= `Open(ctx, SchemaConfig(schema))`）打开，打开后的参数在 `DB` 里只读，默认句柄存在 `active`（atomic）。再连别的库用 `dbpool.New` 开句柄，方法和包级函数同名；每个库的 `pdb.xml` 写不同的 `name`，生成成包里的 `DBName`，`dbctx.SQLTxFromCtx` / `QuerierFromCtx` 按它检查 ctx 里的事务、连接池是不是这个库的（design.md 第 3 节）。已经打开时再开返回 `ErrAlreadyOpen`。`Config` 的零值字段用 pgx 的默认值，只覆盖写了的。`Close` 必须排在服务优雅关闭**之后**，否则会把在途请求打死在半路；之后可以再 `Open`（测试里的 `reopen` 就是这样换配置的）。`DefaultQueryExecMode` 是 `pgx.QueryExecModeExec`（extended protocol、不缓存 prepared statement），配合 pgBouncer 的 transaction pooling。
 - `dbpool.ReadStats()`：Procedure 按结果的计数（`procedureCounters`）和 pgxpool 的统计（design.md 3.3）。
 
 ### SQL 日志（[dbpool/logger.go](dbpool/logger.go)）
@@ -103,7 +103,7 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL（
 ## 约定
 
 - **atomic 只用在确实有无锁并发访问的地方**（同 goxdb）。现有的三处：`active`（每次 Procedure / Query 都读，只有 Open / Close 写）、`sqlLog`（`SetLogger` 随时写，每条日志都读）、`procedureCounters`（各个请求 goroutine 并发累加）。能由锁或单个 goroutine 保护的字段用普通字段：atomic 访问对 `-race` 不可见。新增 atomic 要在字段注释里写明谁在不持锁的情况下访问它。
-- **打开之后的配置只读**：要换配置就 `Close` 再 `Open`，不要去改 `db` 的字段。
+- **打开之后的配置只读**：要换配置就 `Close` 再 `Open`，不要去改 `DB` 的字段。
 - 用 Go 1.27 的写法（写 Go 代码前先跑 modern-go-guidelines 的 `list`）。
 
 ## 已知缺口

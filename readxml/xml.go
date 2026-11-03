@@ -12,7 +12,10 @@ import (
 type Schema struct {
 	File string // 读的是哪个文件，报错时用
 
-	URL       string
+	URL string
+	// Name 是这个库的名字，生成成包里的 DBName，运行时检查事务、查询有没有连错库（见 dbctx.SQLTxFromCtx）。
+	// 一个进程连几个库时，每个 pdb.xml 写一个不同的 name；只连一个库可以不写。
+	Name      string
 	GenOutput string
 	Schema    string
 	Package   string

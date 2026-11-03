@@ -51,7 +51,7 @@ func benchProcedure(b *testing.B, showSQL bool, logger *slog.Logger, lock func(u
 	}
 	b.Cleanup(func() {
 		_ = WithTx(context.Background(), func(ctx context.Context) error {
-			_, err := dbctx.SQLTxFromCtx(ctx).Exec(ctx, `DELETE FROM user_red_envelope WHERE uid = $1`, uid)
+			_, err := dbctx.SQLTxFromCtx(ctx, ptable.DBName).Exec(ctx, `DELETE FROM user_red_envelope WHERE uid = $1`, uid)
 			return err
 		})
 	})

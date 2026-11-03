@@ -245,14 +245,15 @@ func (t mail) queryId(ctx context.Context, q dbctx.Querier, id int64) *Mail {
 }
 
 func (t mail) GetById(ctx context.Context, id int64) *Mail {
+	tx := dbctx.SQLTxFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
 	if o, ok := dbctx.GetCachedRecordAs[*Mail](ctx, "user_mail", id); ok {
 		return o
 	}
-	return t.queryId(ctx, dbctx.SQLTxFromCtx(ctx), id)
+	return t.queryId(ctx, tx, id)
 }
 
 func (t mail) SelectById(ctx context.Context, id int64) *Mail {
-	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx), id)
+	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx, DBName), id)
 }
 
 func (t mail) queryUidConfId(ctx context.Context, q dbctx.Querier, uid int64, confId int32) []*Mail {
@@ -262,11 +263,11 @@ func (t mail) queryUidConfId(ctx context.Context, q dbctx.Querier, uid int64, co
 }
 
 func (t mail) ListByUidConfId(ctx context.Context, uid int64, confId int32) []*Mail {
-	return t.queryUidConfId(ctx, dbctx.SQLTxFromCtx(ctx), uid, confId)
+	return t.queryUidConfId(ctx, dbctx.SQLTxFromCtx(ctx, DBName), uid, confId)
 }
 
 func (t mail) SelectListByUidConfId(ctx context.Context, uid int64, confId int32) []*Mail {
-	return t.queryUidConfId(ctx, dbctx.QuerierFromCtx(ctx), uid, confId)
+	return t.queryUidConfId(ctx, dbctx.QuerierFromCtx(ctx, DBName), uid, confId)
 }
 
 // DeleteById 按主键标记删除，提交前 flush 成 DELETE；找不到返回 false。
@@ -282,11 +283,11 @@ func (t mail) DeleteById(ctx context.Context, id int64) bool {
 const selectAllMail = "SELECT " + selectColumnsMail + " FROM \"public\".\"user_mail\""
 
 func (t mail) GetAll(ctx context.Context) []*Mail {
-	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx), selectAllMail, scanMail)
+	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx, DBName), selectAllMail, scanMail)
 }
 
 func (t mail) SelectAll(ctx context.Context) []*Mail {
-	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx), selectAllMail, scanMail)
+	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx, DBName), selectAllMail, scanMail)
 }
 
 // Insert 插入一个 NewMail() 创建的新对象，主键由数据库生成并回填。
@@ -294,7 +295,7 @@ func (t mail) Insert(ctx context.Context, o *Mail) {
 	if o.loaded {
 		panic("pdbgen: user_mail: Insert 只接受 NewMail() 创建、还没插入过的对象")
 	}
-	tx := dbctx.SQLTxFromCtx(ctx)
+	tx := dbctx.SQLTxFromCtx(ctx, DBName)
 	dbctx.GetOrAddCachedRecord(ctx, o) // 主键还是 0：只登记快照，回滚时恢复成插入前的样子
 	const query = "INSERT INTO \"public\".\"user_mail\" (\"uid\", \"conf_id\", \"state\", \"receive_at\", \"params\", \"award_list\") VALUES ($1, $2, $3, $4, $5, $6) RETURNING \"id\""
 	dbctx.InsertReturning(ctx, tx, query, &o.id,

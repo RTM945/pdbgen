@@ -232,14 +232,15 @@ func (t gMMail) queryId(ctx context.Context, q dbctx.Querier, id int64) *GMMail 
 }
 
 func (t gMMail) GetById(ctx context.Context, id int64) *GMMail {
+	tx := dbctx.SQLTxFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
 	if o, ok := dbctx.GetCachedRecordAs[*GMMail](ctx, "user_gm_mail", id); ok {
 		return o
 	}
-	return t.queryId(ctx, dbctx.SQLTxFromCtx(ctx), id)
+	return t.queryId(ctx, tx, id)
 }
 
 func (t gMMail) SelectById(ctx context.Context, id int64) *GMMail {
-	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx), id)
+	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx, DBName), id)
 }
 
 // DeleteById 按主键标记删除，提交前 flush 成 DELETE；找不到返回 false。
@@ -255,11 +256,11 @@ func (t gMMail) DeleteById(ctx context.Context, id int64) bool {
 const selectAllGMMail = "SELECT " + selectColumnsGMMail + " FROM \"public\".\"user_gm_mail\""
 
 func (t gMMail) GetAll(ctx context.Context) []*GMMail {
-	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx), selectAllGMMail, scanGMMail)
+	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx, DBName), selectAllGMMail, scanGMMail)
 }
 
 func (t gMMail) SelectAll(ctx context.Context) []*GMMail {
-	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx), selectAllGMMail, scanGMMail)
+	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx, DBName), selectAllGMMail, scanGMMail)
 }
 
 // Insert 插入一个 NewGMMail() 创建的新对象，主键由数据库生成并回填。
@@ -267,7 +268,7 @@ func (t gMMail) Insert(ctx context.Context, o *GMMail) {
 	if o.loaded {
 		panic("pdbgen: user_gm_mail: Insert 只接受 NewGMMail() 创建、还没插入过的对象")
 	}
-	tx := dbctx.SQLTxFromCtx(ctx)
+	tx := dbctx.SQLTxFromCtx(ctx, DBName)
 	dbctx.GetOrAddCachedRecord(ctx, o) // 主键还是 0：只登记快照，回滚时恢复成插入前的样子
 	const query = "INSERT INTO \"public\".\"user_gm_mail\" (\"params\", \"award_list\", \"start_at\", \"end_at\", \"channel\", \"user_created_at\", \"condition\") VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING \"id\""
 	dbctx.InsertReturning(ctx, tx, query, &o.id,

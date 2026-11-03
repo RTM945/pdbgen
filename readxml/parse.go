@@ -110,6 +110,7 @@ func (p *parser) schema(root *node) *Schema {
 	}
 	p.attrs(root, map[string]any{
 		"url":                               &s.URL,
+		"name":                              &s.Name,
 		"genOutput":                         &s.GenOutput,
 		"schema":                            &s.Schema,
 		"package":                           &s.Package,

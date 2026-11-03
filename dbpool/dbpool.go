@@ -30,7 +30,7 @@ var (
 	// ErrNotOpen：还没有 Open / Init（或者已经 Close）就开事务、查询。
 	ErrNotOpen = errors.New("dbpool: not open: call dbpool.Open or dbpool.Init first")
 
-	// ErrAlreadyOpen：已经打开时又 Open / Init。连接池是进程级的，同一时刻只有一个。
+	// ErrAlreadyOpen：已经打开时又 Open / Init。包级函数用的默认句柄同一时刻只有一个，别的库用 New 开自己的句柄。
 	ErrAlreadyOpen = errors.New("dbpool: already open")
 
 	// ErrInTransaction：在事务里调用 Query。Query 从池里另取连接，读不到本事务改过的数据。
@@ -49,6 +49,10 @@ var (
 // （URL 里的 pool_max_conns 等参数照常生效），超时为 0 表示不设。pdb.xml 里的写法见 SchemaConfig。
 type Config struct {
 	URL string // PostgreSQL 连接串
+
+	// Name 是这个库的名字（pdb.xml 的 name），开出来的事务、查询都带着它；
+	// 生成的代码按自己包里的 DBName 取事务，对不上时 panic（见 dbctx.SQLTxFromCtx）。
+	Name string
 
 	MaxConns          int32
 	MinConns          int32
@@ -83,6 +87,7 @@ func SchemaConfig(s *readxml.Schema) Config {
 	ms := func(n int) time.Duration { return time.Duration(n) * time.Millisecond }
 	return Config{
 		URL:                             s.URL,
+		Name:                            s.Name,
 		MaxConns:                        s.PoolMaxConns,
 		MinConns:                        s.PoolMinConns,
 		MaxConnLifetime:                 sec(s.PoolMaxConnLifetime),
@@ -150,8 +155,11 @@ func (c Config) poolConfig() (*pgxpool.Config, error) {
 	return pc, nil
 }
 
-// db 是 Open 建立的连接池和它的运行参数。打开之后只读，计数器除外。
-type db struct {
+// DB 是 New 建立的一个库的连接池和它的运行参数。打开之后只读，计数器除外。
+// 只连一个库时用包级函数（Open / Procedure / Query），它们用的是默认句柄；
+// 再连别的库就 New 一个 DB，用它的同名方法。
+type DB struct {
+	name          string // Config.Name
 	pool          *pgxpool.Pool
 	beginSQL      string        // BEGIN 加上 SET LOCAL，见 buildBeginSQL
 	budget        time.Duration // Config.TransactionTimeout
@@ -160,26 +168,36 @@ type db struct {
 	stats         procedureCounters
 }
 
-// active 是当前打开的连接池。每次 Procedure / Query 都不加锁地读它，只有 Open / Close 写，所以是 atomic。
-var active atomic.Pointer[db]
+// active 是包级函数用的默认句柄。每次 Procedure / Query 都不加锁地读它，只有 Open / Close 写，所以是 atomic：
+// 关服时等在途工作超时后照样 Close，晚到的调用拿到 ErrNotOpen，而不是数据竞争。
+var active atomic.Pointer[DB]
 
-// Open 建立进程级的连接池，之后 Procedure / WithTx / Query 都用它；已经打开时返回 ErrAlreadyOpen。
-// 和 pgxpool 一样不预先连库：连不上要到第一次用的时候才知道。
-func Open(ctx context.Context, cfg Config) error {
-	if active.Load() != nil {
-		return ErrAlreadyOpen
-	}
+// New 建立一个库的连接池。和 pgxpool 一样不预先连库：连不上要到第一次用的时候才知道。
+func New(ctx context.Context, cfg Config) (*DB, error) {
 	pc, err := cfg.poolConfig()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	d := &db{
+	d := &DB{
+		name:          cfg.Name,
 		beginSQL:      buildBeginSQL(cfg.StatementTimeout, cfg.IdleInTransactionSessionTimeout, cfg.LockTimeout),
 		budget:        cfg.TransactionTimeout,
 		commitTimeout: cmp.Or(cfg.CommitTimeout, defaultCommitTimeout),
 		showSQL:       cfg.ShowSQL,
 	}
 	if d.pool, err = pgxpool.NewWithConfig(ctx, pc); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+// Open 用 New 建立默认句柄，之后包级的 Procedure / WithTx / Query 都用它；已经打开时返回 ErrAlreadyOpen。
+func Open(ctx context.Context, cfg Config) error {
+	if active.Load() != nil {
+		return ErrAlreadyOpen
+	}
+	d, err := New(ctx, cfg)
+	if err != nil {
 		return err
 	}
 	if !active.CompareAndSwap(nil, d) {
@@ -215,15 +233,18 @@ func buildBeginSQL(statementTimeout, idleInTransactionSessionTimeout, lockTimeou
 	return b.String()
 }
 
-// Close 关掉连接池，重复调用安全。之后的 Procedure / Query 返回 ErrNotOpen，可以再 Open。
+// Close 关掉默认句柄，重复调用安全。之后包级的 Procedure / Query 返回 ErrNotOpen，可以再 Open。
 //
 // 必须排在 HTTP 服务优雅关闭**之后**：pgxpool 的 Close 会阻塞到所有借出的连接归还，
 // 并拒绝后续的 Acquire——在途请求还没跑完就调它，等于把它们打死在半路。
 func Close() {
 	if d := active.Swap(nil); d != nil {
-		d.pool.Close()
+		d.Close()
 	}
 }
+
+// Close 关掉这个句柄的连接池，重复调用安全，时机同包级的 Close。之后再用它，SQL 返回连接池已关闭的错误。
+func (d *DB) Close() { d.pool.Close() }
 
 // Query 在事务外执行只读回调：SelectByXxx / SelectAll 从连接池读，每次查询各取一条连接。
 // 不能在事务里调用（返回 ErrInTransaction）——事务里改过的数据，从池里另一条连接读不到。
@@ -231,13 +252,18 @@ func Close() {
 // 回调里 SQL 出错时，Query 返回这个错误（回调不需要逐个检查）；回调自己的 panic 原样上抛。
 // 这里没有事务，SET LOCAL 管不到；回调受 TransactionTimeout 限制（超过返回 ErrTimeout），
 // 服务端的上限要靠角色级的 statement_timeout（见 docs/design.md）。
-func Query(ctx context.Context, fn func(context.Context) error) (err error) {
-	if dbctx.InTransaction(ctx) {
-		return ErrInTransaction
-	}
+func Query(ctx context.Context, fn func(context.Context) error) error {
 	d := active.Load()
 	if d == nil {
 		return ErrNotOpen
+	}
+	return d.Query(ctx, fn)
+}
+
+// Query 同包级的 Query，用这个句柄的连接池。
+func (d *DB) Query(ctx context.Context, fn func(context.Context) error) (err error) {
+	if dbctx.InTransaction(ctx) {
+		return ErrInTransaction
 	}
 	if d.budget > 0 {
 		var cancel context.CancelFunc
@@ -256,7 +282,7 @@ func Query(ctx context.Context, fn func(context.Context) error) (err error) {
 			err = fmt.Errorf("%w: %w", ErrTimeout, err)
 		}
 	}()
-	return fn(dbctx.WithQuerier(ctx, d.wrap(d.pool)))
+	return fn(dbctx.WithQuerier(ctx, d.name, d.wrap(d.pool)))
 }
 
 // overBudget 报告 err 是不是这次 Procedure / Query 自己的预算到期造成的，
@@ -289,12 +315,17 @@ type procedureCounters struct {
 	committed, busy, timedOut, failed, panicked, unknown atomic.Uint64
 }
 
-// ReadStats 返回当前连接池的计数；没有打开时返回零值。
+// ReadStats 返回默认句柄的计数；没有打开时返回零值。
 func ReadStats() Stats {
 	d := active.Load()
 	if d == nil {
 		return Stats{}
 	}
+	return d.Stats()
+}
+
+// Stats 返回这个句柄的计数。
+func (d *DB) Stats() Stats {
 	return Stats{
 		Procedures: ProcedureStats{
 			Committed: d.stats.committed.Load(),

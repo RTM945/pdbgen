@@ -85,6 +85,11 @@ func WithTx(ctx context.Context, fn func(context.Context) error) error {
 	return Procedure(ctx, ProcedureOptions{}, fn)
 }
 
+// WithTx 同包级的 WithTx，用这个句柄的连接池。
+func (d *DB) WithTx(ctx context.Context, fn func(context.Context) error) error {
+	return d.Procedure(ctx, ProcedureOptions{}, fn)
+}
+
 // Procedure 是事务的唯一入口：BEGIN（带超时）→ 咨询锁 → fn → flush → COMMIT。
 //
 //   - fn 返回错误、fn 里的 SQL 出错（生成代码的查询、Insert）、flush 失败时回滚，把错误返回给调用方；
@@ -93,20 +98,25 @@ func WithTx(ctx context.Context, fn func(context.Context) error) error {
 //     fn 只执行一次，不自动重试。
 //   - 超过预算返回 ErrTimeout；咨询锁没拿到返回 ErrAdvisoryLockNotAcquired；
 //     COMMIT 等不到结果返回 ErrCommitUnknown（这时不回滚内存，也不执行钩子）。
-//   - 不能嵌套：ctx 里已经有事务时返回 ErrNestedTransaction。钩子拿到的 ctx 不带事务，可以开新事务。
+//   - 不能嵌套：ctx 里已经有事务时返回 ErrNestedTransaction（别的库的事务也算）。钩子拿到的 ctx 不带事务，可以开新事务。
 //   - 结束后（提交、回滚、提交结果不确定）事务里的实体全部脱离事务，再改会 panic。
 func Procedure(ctx context.Context, opts ProcedureOptions, fn func(context.Context) error) error {
-	if dbctx.InTransaction(ctx) {
-		return ErrNestedTransaction
-	}
 	d := active.Load()
 	if d == nil {
 		return ErrNotOpen
 	}
+	return d.Procedure(ctx, opts, fn)
+}
+
+// Procedure 同包级的 Procedure，用这个句柄的连接池。
+func (d *DB) Procedure(ctx context.Context, opts ProcedureOptions, fn func(context.Context) error) error {
+	if dbctx.InTransaction(ctx) {
+		return ErrNestedTransaction
+	}
 	return d.procedure(ctx, opts, fn)
 }
 
-func (d *db) procedure(ctx context.Context, opts ProcedureOptions, fn func(context.Context) error) (err error) {
+func (d *DB) procedure(ctx context.Context, opts ProcedureOptions, fn func(context.Context) error) (err error) {
 	if timeout := earliest(d.budget, opts.Timeout); timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeoutCause(ctx, timeout, ErrTimeout)
@@ -120,7 +130,7 @@ func (d *db) procedure(ctx context.Context, opts ProcedureOptions, fn func(conte
 		return d.failed(ctx, err)
 	}
 	txn := newTransaction(d.wrap(tx))
-	txn.logSQL = d.showSQL
+	txn.dbName, txn.logSQL = d.name, d.showSQL
 	// 加锁在 fn 之前：fn 里登记的行，都是持有这把锁之后读出来的
 	txn.lockKey, txn.locked = opts.Lock.bigint()
 	ctx = dbctx.WithTransaction(ctx, txn)
@@ -180,14 +190,14 @@ func (d *db) procedure(ctx context.Context, opts ProcedureOptions, fn func(conte
 // commit 发 COMMIT 并等结果。COMMIT 不受预算限制：一旦发出去就要等到结果——ctx 到期时 pgx 会断开连接，
 // 而 COMMIT 可能已经在 PG 上执行完了，客户端就不知道到底提交没有，重试会重复发放。
 // 但也不能无限等：网络半断时 pgx 会一直等到 TCP 超时。超过 commitTimeout 按结果不确定处理。
-func (d *db) commit(ctx context.Context, tx pgx.Tx) error {
+func (d *DB) commit(ctx context.Context, tx pgx.Tx) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.commitTimeout)
 	defer cancel()
 	return tx.Commit(ctx)
 }
 
 // rollback 恢复内存对象，回滚 SQL 事务，再执行 AfterRollback 钩子。
-func (d *db) rollback(hookCtx context.Context, tx pgx.Tx, txn *transaction) {
+func (d *DB) rollback(hookCtx context.Context, tx pgx.Tx, txn *transaction) {
 	txn.rollback()
 	ctx, cancel := context.WithTimeout(hookCtx, d.commitTimeout)
 	defer cancel()
@@ -196,7 +206,7 @@ func (d *db) rollback(hookCtx context.Context, tx pgx.Tx, txn *transaction) {
 }
 
 // failed 记一次没有提交的 Procedure，返回交给调用方的错误：预算到期造成的带上 ErrTimeout。
-func (d *db) failed(ctx context.Context, err error) error {
+func (d *DB) failed(ctx context.Context, err error) error {
 	switch {
 	case errors.Is(err, ErrAdvisoryLockNotAcquired):
 		d.stats.busy.Add(1)

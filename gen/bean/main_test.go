@@ -81,7 +81,7 @@ func TestGenerateTablePartialIndex(t *testing.T) {
 	mustContain(t, src,
 		"func (t probe) ListWorkerEnabled(ctx context.Context) []*Probe {",
 		"func (t probe) SelectListWorkerEnabled(ctx context.Context) []*Probe {",
-		"return t.queryWhereWorkerEnabled(ctx, dbctx.QuerierFromCtx(ctx))",
+		"return t.queryWhereWorkerEnabled(ctx, dbctx.QuerierFromCtx(ctx, DBName))",
 		`WHERE \"worker_enabled\""`,
 		"dbctx.QueryList(ctx, q, query, scanProbe)\n",
 		`dbctx.CheckPredicate(ctx, "probe", dirtyProbeWorkerEnabled)`,

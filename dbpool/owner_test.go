@@ -35,7 +35,7 @@ func seedMail(t *testing.T, ctx context.Context, uid int64) int64 {
 func cleanupMail(t *testing.T, ctx context.Context, uids ...int64) {
 	t.Helper()
 	if err := WithTx(ctx, func(ctx context.Context) error {
-		_, err := dbctx.SQLTxFromCtx(ctx).Exec(ctx, `DELETE FROM user_mail WHERE uid = ANY($1)`, uids)
+		_, err := dbctx.SQLTxFromCtx(ctx, ptable.DBName).Exec(ctx, `DELETE FROM user_mail WHERE uid = ANY($1)`, uids)
 		return err
 	}); err != nil {
 		t.Errorf("清理 user_mail 失败: %v", err)

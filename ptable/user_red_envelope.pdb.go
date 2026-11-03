@@ -196,14 +196,15 @@ func (t redEnvelope) queryId(ctx context.Context, q dbctx.Querier, id int64) *Re
 }
 
 func (t redEnvelope) GetById(ctx context.Context, id int64) *RedEnvelope {
+	tx := dbctx.SQLTxFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
 	if o, ok := dbctx.GetCachedRecordAs[*RedEnvelope](ctx, "user_red_envelope", id); ok {
 		return o
 	}
-	return t.queryId(ctx, dbctx.SQLTxFromCtx(ctx), id)
+	return t.queryId(ctx, tx, id)
 }
 
 func (t redEnvelope) SelectById(ctx context.Context, id int64) *RedEnvelope {
-	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx), id)
+	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx, DBName), id)
 }
 
 func (t redEnvelope) queryUidActId(ctx context.Context, q dbctx.Querier, uid int64, actId int32) *RedEnvelope {
@@ -213,11 +214,12 @@ func (t redEnvelope) queryUidActId(ctx context.Context, q dbctx.Querier, uid int
 }
 
 func (t redEnvelope) GetByUidActId(ctx context.Context, uid int64, actId int32) *RedEnvelope {
-	return t.queryUidActId(ctx, dbctx.SQLTxFromCtx(ctx), uid, actId)
+	tx := dbctx.SQLTxFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
+	return t.queryUidActId(ctx, tx, uid, actId)
 }
 
 func (t redEnvelope) SelectByUidActId(ctx context.Context, uid int64, actId int32) *RedEnvelope {
-	return t.queryUidActId(ctx, dbctx.QuerierFromCtx(ctx), uid, actId)
+	return t.queryUidActId(ctx, dbctx.QuerierFromCtx(ctx, DBName), uid, actId)
 }
 
 // DeleteById 按主键标记删除，提交前 flush 成 DELETE；找不到返回 false。
@@ -233,11 +235,11 @@ func (t redEnvelope) DeleteById(ctx context.Context, id int64) bool {
 const selectAllRedEnvelope = "SELECT " + selectColumnsRedEnvelope + " FROM \"public\".\"user_red_envelope\""
 
 func (t redEnvelope) GetAll(ctx context.Context) []*RedEnvelope {
-	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx), selectAllRedEnvelope, scanRedEnvelope)
+	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx, DBName), selectAllRedEnvelope, scanRedEnvelope)
 }
 
 func (t redEnvelope) SelectAll(ctx context.Context) []*RedEnvelope {
-	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx), selectAllRedEnvelope, scanRedEnvelope)
+	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx, DBName), selectAllRedEnvelope, scanRedEnvelope)
 }
 
 // Insert 插入一个 NewRedEnvelope() 创建的新对象，主键由数据库生成并回填。
@@ -245,7 +247,7 @@ func (t redEnvelope) Insert(ctx context.Context, o *RedEnvelope) {
 	if o.loaded {
 		panic("pdbgen: user_red_envelope: Insert 只接受 NewRedEnvelope() 创建、还没插入过的对象")
 	}
-	tx := dbctx.SQLTxFromCtx(ctx)
+	tx := dbctx.SQLTxFromCtx(ctx, DBName)
 	dbctx.GetOrAddCachedRecord(ctx, o) // 主键还是 0：只登记快照，回滚时恢复成插入前的样子
 	const query = "INSERT INTO \"public\".\"user_red_envelope\" (\"uid\", \"act_id\", \"last_refresh_at\", \"today_count\", \"total\") VALUES ($1, $2, $3, $4, $5) RETURNING \"id\""
 	dbctx.InsertReturning(ctx, tx, query, &o.id,

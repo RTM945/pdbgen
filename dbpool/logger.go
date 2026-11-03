@@ -58,7 +58,7 @@ func (o *loggingSQLTx) QueryRow(ctx context.Context, sql string, args ...any) pg
 
 // wrap 只在 ShowSQL 打开时才包这一层。包上之后每条 SQL 都会记一条
 // message 是 "sql" 的日志：成功 Info，失败 Error（err 作为属性带上）。
-func (d *db) wrap(tx dbctx.SQLTx) dbctx.SQLTx {
+func (d *DB) wrap(tx dbctx.SQLTx) dbctx.SQLTx {
 	if !d.showSQL {
 		return tx
 	}

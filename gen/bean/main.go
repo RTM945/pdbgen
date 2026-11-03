@@ -87,6 +87,11 @@ func generateAll(schema *readxml.Schema) (map[string][]byte, error) {
 		name := fileName(table.Name)
 		files[name], tables[name] = data, table
 	}
+	data, err := generateDBName(schema)
+	if err != nil {
+		errs = append(errs, err.Error())
+	}
+	files[dbNameFile] = data
 	if len(errs) == 0 {
 		errs = checkDeclarations(schema, files, tables)
 	}
@@ -139,6 +144,19 @@ type tableGen struct {
 }
 
 var tpl = template.Must(template.New("table").Parse(sourceTemplate))
+
+// dbNameFile 放包里的 DBName。表名不能是 pdb（见 checkTables），不会和表的文件重名。
+const dbNameFile = "pdb.pdb.go"
+
+var dbNameTpl = template.Must(template.New("dbname").Parse(dbNameTemplate))
+
+func generateDBName(schema *readxml.Schema) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := dbNameTpl.Execute(&buf, schema); err != nil {
+		return nil, err
+	}
+	return format.Source(buf.Bytes())
+}
 
 func generateTable(schema *readxml.Schema, table readxml.Table) ([]byte, error) {
 	gen, err := buildTableGen(schema, table)
@@ -219,6 +237,10 @@ func checkTables(schema *readxml.Schema) []string {
 	for _, t := range schema.Tables {
 		if !validTableName(t.Name) {
 			errs = append(errs, at(schema, t.Line)+fmt.Sprintf("table %q: 表名只能用小写字母、数字和下划线，小写字母开头", t.Name))
+			continue
+		}
+		if fileName(t.Name) == dbNameFile {
+			errs = append(errs, at(schema, t.Line)+fmt.Sprintf("table %q: 生成的文件和放 DBName 的 %s 重名，换个表名", t.Name, dbNameFile))
 			continue
 		}
 		if other, ok := tables[t.Name]; ok {

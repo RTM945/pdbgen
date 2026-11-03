@@ -178,14 +178,15 @@ func (t user) queryId(ctx context.Context, q dbctx.Querier, id int64) *User {
 }
 
 func (t user) GetById(ctx context.Context, id int64) *User {
+	tx := dbctx.SQLTxFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
 	if o, ok := dbctx.GetCachedRecordAs[*User](ctx, "user", id); ok {
 		return o
 	}
-	return t.queryId(ctx, dbctx.SQLTxFromCtx(ctx), id)
+	return t.queryId(ctx, tx, id)
 }
 
 func (t user) SelectById(ctx context.Context, id int64) *User {
-	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx), id)
+	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx, DBName), id)
 }
 
 // DeleteById 按主键标记删除，提交前 flush 成 DELETE；找不到返回 false。
@@ -201,11 +202,11 @@ func (t user) DeleteById(ctx context.Context, id int64) bool {
 const selectAllUser = "SELECT " + selectColumnsUser + " FROM \"public\".\"user\""
 
 func (t user) GetAll(ctx context.Context) []*User {
-	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx), selectAllUser, scanUser)
+	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx, DBName), selectAllUser, scanUser)
 }
 
 func (t user) SelectAll(ctx context.Context) []*User {
-	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx), selectAllUser, scanUser)
+	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx, DBName), selectAllUser, scanUser)
 }
 
 // Insert 插入一个 NewUser() 创建的新对象，主键由数据库生成并回填。
@@ -213,7 +214,7 @@ func (t user) Insert(ctx context.Context, o *User) {
 	if o.loaded {
 		panic("pdbgen: user: Insert 只接受 NewUser() 创建、还没插入过的对象")
 	}
-	tx := dbctx.SQLTxFromCtx(ctx)
+	tx := dbctx.SQLTxFromCtx(ctx, DBName)
 	dbctx.GetOrAddCachedRecord(ctx, o) // 主键还是 0：只登记快照，回滚时恢复成插入前的样子
 	const query = "INSERT INTO \"public\".\"user\" (\"name\", \"last_login_at\", \"created_at\", \"token\") VALUES ($1, $2, $3, $4) RETURNING \"id\""
 	dbctx.InsertReturning(ctx, tx, query, &o.id,

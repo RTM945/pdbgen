@@ -42,6 +42,14 @@ err = dbpool.Query(ctx, func(ctx context.Context) error {
     mails = ptable.UserMailTable.SelectListByUidConfId(ctx, uid, confID)
     return nil
 })
+
+// 再连一个库：另一个 pdb.xml（写不同的 name、生成到另一个包），用 dbpool.New 开句柄，方法和包级函数同名。
+// 在这个句柄的事务里碰默认库的表（反过来也一样）当场 panic，不会把 SQL 发到错的库上
+logDB, err := dbpool.New(ctx, dbpool.SchemaConfig(logSchema))
+err = logDB.WithTx(ctx, func(ctx context.Context) error {
+    logtable.ModelCallTable.Insert(ctx, call)
+    return nil
+})
 ```
 
 更完整的业务写法见 [example/logic/redenvelope](example/logic/redenvelope/red_envelope.go)。

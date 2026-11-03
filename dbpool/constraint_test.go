@@ -229,7 +229,7 @@ func TestFlushMissingRowFails(t *testing.T) {
 	err := WithTx(ctx, func(ctx context.Context) error {
 		v := ptable.UserRedEnvelopeTable.GetByUidActId(ctx, uid, actId)
 		v.SetTotal(9)
-		_, err := dbctx.SQLTxFromCtx(ctx).Exec(ctx, `DELETE FROM user_red_envelope WHERE id = $1`, v.Id())
+		_, err := dbctx.SQLTxFromCtx(ctx, ptable.DBName).Exec(ctx, `DELETE FROM user_red_envelope WHERE id = $1`, v.Id())
 		return err
 	})
 	if !errors.Is(err, ErrRowNotFound) {

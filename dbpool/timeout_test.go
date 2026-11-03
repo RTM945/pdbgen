@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"pdbgen/dbctx"
+	"pdbgen/ptable"
 )
 
 func TestBuildBeginSQL(t *testing.T) {
@@ -39,7 +40,7 @@ func TestTimeoutsApplyToEveryTransaction(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var got [3]int
 			err := Procedure(t.Context(), ProcedureOptions{Lock: lock}, func(ctx context.Context) error {
-				return dbctx.SQLTxFromCtx(ctx).QueryRow(ctx, `SELECT
+				return dbctx.SQLTxFromCtx(ctx, ptable.DBName).QueryRow(ctx, `SELECT
 					(SELECT setting::int FROM pg_settings WHERE name = 'statement_timeout'),
 					(SELECT setting::int FROM pg_settings WHERE name = 'idle_in_transaction_session_timeout'),
 					(SELECT setting::int FROM pg_settings WHERE name = 'lock_timeout')`,
@@ -63,7 +64,7 @@ func TestStatementTimeoutAppliesWithoutLock(t *testing.T) {
 	reopen(t, func(c *Config) { c.StatementTimeout = 50 * time.Millisecond })
 
 	err := WithTx(t.Context(), func(ctx context.Context) error {
-		_, err := dbctx.SQLTxFromCtx(ctx).Exec(ctx, "SELECT pg_sleep(1)")
+		_, err := dbctx.SQLTxFromCtx(ctx, ptable.DBName).Exec(ctx, "SELECT pg_sleep(1)")
 		return err
 	})
 	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "57014" {
