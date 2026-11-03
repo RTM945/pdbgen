@@ -302,7 +302,7 @@ genddl 的输出包在 `BEGIN; ... COMMIT;` 里（PostgreSQL 的 DDL 是事务�
   - `dbctx.Transaction` 多了 `DBName()`；`WithQuerier(ctx, db, q)`；`SQLTxFromCtx(ctx, db)` / `QuerierFromCtx(ctx, db)` 多了库名参数，对不上时 panic。生成的 `GetById` 先取事务再查缓存。
 - **为什么**：expservergo 要把只追加的日志表放进单独的库，同一个进程连两个库；原来的连接池是进程级单例，再 `Open` 返回 `ErrAlreadyOpen`。生成的代码只从 ctx 里取"当前事务"、不认是哪个库的，在一个库的事务里调另一个库的表，SQL 会悄悄发到错的库上。
 - **影响范围**：`SQLTxFromCtx` / `QuerierFromCtx` 的签名变了，手写 SQL 都要带上 `DBName`（同一个包里直接写 `DBName`，别的包写 `ptable.DBName`），重新生成后不改编不过。只连一个库、`pdb.xml` 不写 `name` 的项目，`DBName` 是空串，行为不变。
-- **验证状态**：`go vet`、`PDBGEN_REQUIRE_DB=1 go test ./...` 通过（本地 PG）。新增 `dbctx.TestWrongDB`、`dbpool.TestSecondHandle`（第二个句柄的事务和查询；在它的事务、查询里碰默认库的表 panic；跨库嵌套返回 `ErrNestedTransaction`）。`-race` 没跑。go_pg_test、`Dev/pdbgen` 还没同步。
+- **验证状态**：`go vet`、`PDBGEN_REQUIRE_DB=1 go test ./...` 通过（本地 PG）。新增 `dbctx.TestWrongDB`、`dbpool.TestSecondHandle`（第二个句柄的事务和查询；在它的事务、查询里碰默认库的表 panic；跨库嵌套返回 `ErrNestedTransaction`）。`-race` 没跑。`Work/MechAlMond/pdbgen` 和 `Dev/pdbgen` 是同一份改动；go_pg_test 还没同步。
 
 ### 2026-11-01 生成器：文件名、重名、过期文件、行号；SQL 带 schema；DDL 包在事务里；不提交 exe
 
