@@ -196,15 +196,11 @@ func (t redEnvelope) queryId(ctx context.Context, q dbctx.Querier, id int64) *Re
 }
 
 func (t redEnvelope) GetById(ctx context.Context, id int64) *RedEnvelope {
-	tx := dbctx.SQLTxFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
+	q := dbctx.ReaderFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
 	if o, ok := dbctx.GetCachedRecordAs[*RedEnvelope](ctx, "user_red_envelope", id); ok {
 		return o
 	}
-	return t.queryId(ctx, tx, id)
-}
-
-func (t redEnvelope) SelectById(ctx context.Context, id int64) *RedEnvelope {
-	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx, DBName), id)
+	return t.queryId(ctx, q, id)
 }
 
 func (t redEnvelope) queryUidActId(ctx context.Context, q dbctx.Querier, uid int64, actId int32) *RedEnvelope {
@@ -214,12 +210,8 @@ func (t redEnvelope) queryUidActId(ctx context.Context, q dbctx.Querier, uid int
 }
 
 func (t redEnvelope) GetByUidActId(ctx context.Context, uid int64, actId int32) *RedEnvelope {
-	tx := dbctx.SQLTxFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
-	return t.queryUidActId(ctx, tx, uid, actId)
-}
-
-func (t redEnvelope) SelectByUidActId(ctx context.Context, uid int64, actId int32) *RedEnvelope {
-	return t.queryUidActId(ctx, dbctx.QuerierFromCtx(ctx, DBName), uid, actId)
+	q := dbctx.ReaderFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
+	return t.queryUidActId(ctx, q, uid, actId)
 }
 
 // DeleteById 按主键标记删除，提交前 flush 成 DELETE；找不到返回 false。
@@ -235,11 +227,7 @@ func (t redEnvelope) DeleteById(ctx context.Context, id int64) bool {
 const selectAllRedEnvelope = "SELECT " + selectColumnsRedEnvelope + " FROM \"public\".\"user_red_envelope\""
 
 func (t redEnvelope) GetAll(ctx context.Context) []*RedEnvelope {
-	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx, DBName), selectAllRedEnvelope, scanRedEnvelope)
-}
-
-func (t redEnvelope) SelectAll(ctx context.Context) []*RedEnvelope {
-	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx, DBName), selectAllRedEnvelope, scanRedEnvelope)
+	return dbctx.QueryList(ctx, dbctx.ReaderFromCtx(ctx, DBName), selectAllRedEnvelope, scanRedEnvelope)
 }
 
 // Insert 插入一个 NewRedEnvelope() 创建的新对象，主键由数据库生成并回填。

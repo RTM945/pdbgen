@@ -25,7 +25,7 @@ func selectRedEnvelope(t *testing.T, ctx context.Context, uid int64, actId int32
 	t.Helper()
 	var v *ptable.RedEnvelope
 	if err := Query(ctx, func(ctx context.Context) error {
-		v = ptable.UserRedEnvelopeTable.SelectByUidActId(ctx, uid, actId)
+		v = ptable.UserRedEnvelopeTable.GetByUidActId(ctx, uid, actId)
 		return nil
 	}); err != nil {
 		t.Fatalf("查询失败: %v", err)
@@ -121,7 +121,7 @@ func TestQueryReturnsSQLError(t *testing.T) {
 
 	err := Query(t.Context(), func(ctx context.Context) error {
 		<-ctx.Done()
-		ptable.UserRedEnvelopeTable.SelectById(ctx, 1)
+		ptable.UserRedEnvelopeTable.GetById(ctx, 1)
 		return nil
 	})
 	if !errors.Is(err, ErrTimeout) || !errors.Is(err, context.DeadlineExceeded) {

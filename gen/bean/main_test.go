@@ -80,16 +80,18 @@ func TestGenerateTablePartialIndex(t *testing.T) {
 	))
 	mustContain(t, src,
 		"func (t probe) ListWorkerEnabled(ctx context.Context) []*Probe {",
-		"func (t probe) SelectListWorkerEnabled(ctx context.Context) []*Probe {",
-		"return t.queryWhereWorkerEnabled(ctx, dbctx.QuerierFromCtx(ctx, DBName))",
+		"return t.queryWhereWorkerEnabled(ctx, dbctx.ReaderFromCtx(ctx, DBName))",
 		`WHERE \"worker_enabled\""`,
 		"dbctx.QueryList(ctx, q, query, scanProbe)\n",
 		`dbctx.CheckPredicate(ctx, "probe", dirtyProbeWorkerEnabled)`,
 		"func (t probe) GetFailedByUid(ctx context.Context, uid int64) *Probe {",
-		"func (t probe) SelectFailedByUid(ctx context.Context, uid int64) *Probe {",
 		`WHERE \"uid\" = $1 AND \"state\" = -1 AND NOT \"worker_enabled\""`,
 		`dbctx.CheckPredicate(ctx, "probe", dirtyProbeUid|dirtyProbeState|dirtyProbeWorkerEnabled)`,
 	)
+	// 一个查询只生成一个方法，事务内外都能调，不再有 SelectXxx。
+	if strings.Contains(src, ") Select") {
+		t.Fatal("不应该再生成 SelectXxx")
+	}
 }
 
 // TestBuildTableGenRejects 框架不支持的写法在生成阶段直接报错，而不是生成出编不过或跑不对的代码。

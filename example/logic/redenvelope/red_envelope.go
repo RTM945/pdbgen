@@ -33,12 +33,7 @@ type RedEnvelope struct {
 // Get 取 uid 在活动 actID 里的红包记录，没有就新建一条（readonly 时只在内存里新建，不插入）。
 // readonly=false 必须在事务里调用，readonly=true 必须在 dbpool.Query 里调用。
 func Get(ctx context.Context, uid int64, actID int32, readonly bool, now time.Time) *RedEnvelope {
-	var r *ptable.RedEnvelope
-	if readonly {
-		r = ptable.UserRedEnvelopeTable.SelectByUidActId(ctx, uid, actID)
-	} else {
-		r = ptable.UserRedEnvelopeTable.GetByUidActId(ctx, uid, actID)
-	}
+	r := ptable.UserRedEnvelopeTable.GetByUidActId(ctx, uid, actID)
 	if r == nil {
 		r = ptable.NewRedEnvelope()
 		r.SetUid(uid)

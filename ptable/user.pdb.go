@@ -178,15 +178,11 @@ func (t user) queryId(ctx context.Context, q dbctx.Querier, id int64) *User {
 }
 
 func (t user) GetById(ctx context.Context, id int64) *User {
-	tx := dbctx.SQLTxFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
+	q := dbctx.ReaderFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
 	if o, ok := dbctx.GetCachedRecordAs[*User](ctx, "user", id); ok {
 		return o
 	}
-	return t.queryId(ctx, tx, id)
-}
-
-func (t user) SelectById(ctx context.Context, id int64) *User {
-	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx, DBName), id)
+	return t.queryId(ctx, q, id)
 }
 
 // DeleteById 按主键标记删除，提交前 flush 成 DELETE；找不到返回 false。
@@ -202,11 +198,7 @@ func (t user) DeleteById(ctx context.Context, id int64) bool {
 const selectAllUser = "SELECT " + selectColumnsUser + " FROM \"public\".\"user\""
 
 func (t user) GetAll(ctx context.Context) []*User {
-	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx, DBName), selectAllUser, scanUser)
-}
-
-func (t user) SelectAll(ctx context.Context) []*User {
-	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx, DBName), selectAllUser, scanUser)
+	return dbctx.QueryList(ctx, dbctx.ReaderFromCtx(ctx, DBName), selectAllUser, scanUser)
 }
 
 // Insert 插入一个 NewUser() 创建的新对象，主键由数据库生成并回填。

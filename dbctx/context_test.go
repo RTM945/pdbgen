@@ -174,12 +174,21 @@ func TestTransactionOnlyHelpers(t *testing.T) {
 	}
 }
 
-// TestQuerierFromCtx SelectByXxx 只能在 dbpool.Query 里、事务外调用。
-func TestQuerierFromCtx(t *testing.T) {
-	mustPanic(t, "dbpool.Query", func() { QuerierFromCtx(context.Background(), "") })
+// TestReaderFromCtx 只读查询在事务里用本事务，在 dbpool.Query 里用连接池，两边都不在时 panic。
+func TestReaderFromCtx(t *testing.T) {
+	mustPanic(t, "dbpool.Query", func() { ReaderFromCtx(context.Background(), "") })
 
-	inTx := WithTransaction(context.Background(), newTestTransaction())
-	mustPanic(t, "不能在事务里调用", func() { QuerierFromCtx(inTx, "") })
+	pool := &failingQuerier{}
+	inQuery := WithQuerier(context.Background(), "", pool)
+	if got := ReaderFromCtx(inQuery, ""); got != pool {
+		t.Fatalf("Query 里应该用连接池，实际 %v", got)
+	}
+
+	// 事务优先：Procedure 里拿到的 ctx 可能也带着外层 Query 的连接池，那条连接读不到本事务的修改。
+	inTx := WithTransaction(inQuery, newTestTransaction())
+	if got := ReaderFromCtx(inTx, ""); got != nil {
+		t.Fatalf("事务里应该用本事务（testTransaction.SQLTx 是 nil），实际 %v", got)
+	}
 }
 
 // TestWrongDB ctx 里的事务、连接池开在别的库上时，按 db 取它直接 panic。
@@ -189,10 +198,12 @@ func TestWrongDB(t *testing.T) {
 	inTx := WithTransaction(context.Background(), txn)
 	SQLTxFromCtx(inTx, "game")
 	mustPanic(t, `开在库 "game" 上，要操作的表在库 "log"`, func() { SQLTxFromCtx(inTx, "log") })
+	ReaderFromCtx(inTx, "game")
+	mustPanic(t, `开在库 "game" 上，要操作的表在库 "log"`, func() { ReaderFromCtx(inTx, "log") })
 
 	inQuery := WithQuerier(context.Background(), "game", nil)
-	QuerierFromCtx(inQuery, "game")
-	mustPanic(t, `开在库 "game" 上，要操作的表在库 "log"`, func() { QuerierFromCtx(inQuery, "log") })
+	ReaderFromCtx(inQuery, "game")
+	mustPanic(t, `开在库 "game" 上，要操作的表在库 "log"`, func() { ReaderFromCtx(inQuery, "log") })
 }
 
 // TestUpdateStmt 只拼脏列，主键是最后一个参数。

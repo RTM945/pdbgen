@@ -46,7 +46,7 @@ func mailState(t *testing.T, ctx context.Context, id int64) int32 {
 	t.Helper()
 	var m *ptable.Mail
 	if err := Query(ctx, func(ctx context.Context) error {
-		m = ptable.UserMailTable.SelectById(ctx, id)
+		m = ptable.UserMailTable.GetById(ctx, id)
 		return nil
 	}); err != nil || m == nil {
 		t.Fatalf("查询邮件 %d 失败: m=%v err=%v", id, m, err)

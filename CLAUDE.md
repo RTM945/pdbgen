@@ -52,8 +52,8 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL（
 
 生成代码对表结构的约定：
 
-- 复合索引用逗号分隔写在 `index` 的 `variable` 上（`uid,actId`）。**unique 索引生成单行查询 `GetByXxx`/`SelectByXxx`，非 unique 索引生成列表查询 `ListByXxx`/`SelectListByXxx`**，主键固定是 `GetById`/`SelectById`。改 `unique` 会改变生成的 API 形态。
-- 部分索引：`<index variable="uid" where="state=0, flag=true" method="PendingByUid"/>` 生成 `ListPendingByUid` / `SelectListPendingByUid`（unique 时 `Get`/`Select` 前缀），`variable` 可省（索引建在主键上，查询无参数）。`where` 只支持 bool 和整数列，常量写进 SQL 而不是 `$n` 参数（否则规划器用不上部分索引）。规则见 [docs/design.md](docs/design.md) 第 4 节。
+- 复合索引用逗号分隔写在 `index` 的 `variable` 上（`uid,actId`）。**unique 索引生成单行查询 `GetByXxx`，非 unique 索引生成列表查询 `ListByXxx`**，主键固定是 `GetById`。改 `unique` 会改变生成的 API 形态。
+- 部分索引：`<index variable="uid" where="state=0, flag=true" method="PendingByUid"/>` 生成 `ListPendingByUid`（unique 时 `Get` 前缀），`variable` 可省（索引建在主键上，查询无参数）。`where` 只支持 bool 和整数列，常量写进 SQL 而不是 `$n` 参数（否则规划器用不上部分索引）。规则见 [docs/design.md](docs/design.md) 第 4 节。
 - `<table lock="uid">`：每一行由 key 等于这一列的值的 bigint 咨询锁保护，生成的实体实现 `dbctx.Owned`，事务没持有这把锁时查出来的行只读（`SetXxx` / `Delete` panic）。归某个玩家的表都应该写，规则见 design.md 2.8。
 - 主键必须是 `int64` 且 `autoIncrement="true"`：不出现在 INSERT 的字段列表里，靠 `RETURNING id` 回填，也不参与 UPDATE。`primaryKey` 的 `start` / `step` 生成 `START WITH` / `INCREMENT BY`；只影响 identity 首次创建，已存在的 identity 不会被自动修改。
 - SQL 里的表名带 schema（`"public"."user_mail"`，`schema` 属性默认 `public`），和 DDL 建表的位置一致，不依赖连接的 search_path。`TableName()` 仍然是不带 schema 的表名（身份表的 key、日志和错误信息）。
@@ -79,9 +79,9 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL（
 
 框架不为不支持的写法做兼容，而是让它们当场失败（完整列表见 [docs/design.md](docs/design.md) 2.7）。改代码时保持这个方向：新发现的坑优先加约束，而不是加兼容机制。
 
-- `GetByXxx` / `ListByXxx` / `GetAll` / `Insert` 需要 ctx 里有事务，否则 panic；`SelectByXxx` / `SelectAll` 只能在 `dbpool.Query` 里、事务外调用，否则 panic；`dbpool.Query` 在事务里调用返回错误（事务改了数据、Query 却从池里另一条连接读，会读到旧值）。
+- 查询（`GetByXxx` / `ListByXxx` / `GetAll`）事务里、`dbpool.Query` 里都能调，连接由 `dbctx.ReaderFromCtx` 按 ctx 取：事务里查出来的能改，Query 里查出来的只读；两边都不在时 panic。`Insert` 和手写的写操作（`dbctx.SQLTxFromCtx`）只能在事务里。`dbpool.Query` 在事务里调用返回错误（事务里直接查就是）。手写的只读查询也用 `ReaderFromCtx`，一条查询只写一个方法。
 - 嵌套 `Procedure` 返回 `ErrNestedTransaction`；改脱离事务的实体 panic；改了查询条件列再按它查同一张表 panic；`Insert` 一个已经插入过的对象 panic。
-- 写业务逻辑时先确定这段代码在不在事务里，再选方法；同一事务里先查后改。
+- 同一事务里先查后改。
 
 **回调里 panic 是错误传播方式，事务边界把它变成返回值**（同 goxdb 的 `abort`）：生成代码的查询和 `Insert` 遇到 SQL 错误时经 `dbctx.fail` 以 `*abort` panic 结束，`Procedure` / `Query` 接住它（`dbctx.AbortError`），回滚后把错误返回给调用方。回调里不需要逐个检查 SQL 错误，调用方用 `errors.Is` / `errors.As` 分类（23505、`ErrTimeout`、`context.Canceled`）。业务自己的 panic 和误用的 panic 不是 abort，回滚后原样重抛。新增会执行 SQL 的生成代码，出错时要走 `dbctx` 的辅助函数（`QueryOne` / `QueryList` / `InsertReturning`），不要在生成代码里直接 `panic(err)`。
 
@@ -93,7 +93,7 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL（
 - `transactionTimeoutMs` 是客户端预算，同时管 `Procedure` 和 `dbpool.Query` 回调，超过返回 `ErrTimeout`（调用方自己取消、到期时不带它，见 `overBudget`）。pgx 在 ctx 到期时只断开连接、不发 CancelRequest，服务端靠 `statement_timeout` 停下；`Query` 没有事务，服务端上限要用角色级 `statement_timeout`。COMMIT 用 `context.WithoutCancel(ctx)`：一旦发出去就必须等到结果，避免"不知道到底提交没有"导致重试重复发放；但最多等 `commitTimeoutMs`（默认 30s），等不到返回 `ErrCommitUnknown`，不回滚内存也不跑钩子。
 - 锁用 `ProcedureOptions.Lock` 指定：`TryAdvisoryLock(key)` / `TryAdvisoryLock2(ns, id)` 拿不到返回 `ErrAdvisoryLockNotAcquired`；`AdvisoryLock(key)` / `AdvisoryLock2(ns, id)` 会阻塞等待（受 `lock_timeout` 限制，等超时同样返回 `ErrAdvisoryLockNotAcquired`）。try 锁失败是正常的"玩家忙"信号，业务直接返回稍后再试，不要在请求内退避重试；框架也不自动重试。key 的语义框架不关心，bigint 形式约定只给 uid 用。
 - 这套锁是用来替代 `SELECT ... FOR UPDATE` 做玩家级串行的（README 有说明：玩家请求用 try 版，GM/RPC 写请求用阻塞版，只读请求走非事务的 `Query`）。
-- 包级函数用默认句柄：`dbpool.Open(ctx, Config)` / `dbpool.Init(ctx, schema)`（= `Open(ctx, SchemaConfig(schema))`）打开，打开后的参数在 `DB` 里只读，默认句柄存在 `active`（atomic）。再连别的库用 `dbpool.New` 开句柄，方法和包级函数同名；每个库的 `pdb.xml` 写不同的 `name`，生成成包里的 `DBName`，`dbctx.SQLTxFromCtx` / `QuerierFromCtx` 按它检查 ctx 里的事务、连接池是不是这个库的（design.md 第 3 节）。已经打开时再开返回 `ErrAlreadyOpen`。`Config` 的零值字段用 pgx 的默认值，只覆盖写了的。`Close` 必须排在服务优雅关闭**之后**，否则会把在途请求打死在半路；之后可以再 `Open`（测试里的 `reopen` 就是这样换配置的）。`DefaultQueryExecMode` 是 `pgx.QueryExecModeExec`（extended protocol、不缓存 prepared statement），配合 pgBouncer 的 transaction pooling。
+- 包级函数用默认句柄：`dbpool.Open(ctx, Config)` / `dbpool.Init(ctx, schema)`（= `Open(ctx, SchemaConfig(schema))`）打开，打开后的参数在 `DB` 里只读，默认句柄存在 `active`（atomic）。再连别的库用 `dbpool.New` 开句柄，方法和包级函数同名；每个库的 `pdb.xml` 写不同的 `name`，生成成包里的 `DBName`，`dbctx.SQLTxFromCtx` / `ReaderFromCtx` 按它检查 ctx 里的事务、连接池是不是这个库的（design.md 第 3 节）。已经打开时再开返回 `ErrAlreadyOpen`。`Config` 的零值字段用 pgx 的默认值，只覆盖写了的。`Close` 必须排在服务优雅关闭**之后**，否则会把在途请求打死在半路；之后可以再 `Open`（测试里的 `reopen` 就是这样换配置的）。`DefaultQueryExecMode` 是 `pgx.QueryExecModeExec`（extended protocol、不缓存 prepared statement），配合 pgBouncer 的 transaction pooling。
 - `dbpool.ReadStats()`：Procedure 按结果的计数（`procedureCounters`）和 pgxpool 的统计（design.md 3.3）。
 
 ### SQL 日志（[dbpool/logger.go](dbpool/logger.go)）
@@ -115,4 +115,4 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL（
 
 ## 参考实现
 
-[example/logic/redenvelope/red_envelope.go](example/logic/redenvelope/red_envelope.go) 展示了推荐的业务写法：业务结构体内嵌 `*ptable.Xxx` 加一个 `readonly` 标志，`Get` 按 readonly 分派 `GetByXxx` / `SelectByXxx`，查不到时构造新实体并 `Insert`，之后所有修改只调 `SetXxx`；校验放在最前面，失败就返回错误让整个 Procedure 回滚。它有不连库的单元测试（跨天刷新、次数上限），业务逻辑可以照这个样子用 `NewXxx()` 建的对象测。
+[example/logic/redenvelope/red_envelope.go](example/logic/redenvelope/red_envelope.go) 展示了推荐的业务写法：业务结构体内嵌 `*ptable.Xxx` 加一个 `readonly` 标志，`Get` 调 `GetByXxx`（事务里、Query 里都行），查不到时构造新实体并 `Insert`，之后所有修改只调 `SetXxx`；校验放在最前面，失败就返回错误让整个 Procedure 回滚。它有不连库的单元测试（跨天刷新、次数上限），业务逻辑可以照这个样子用 `NewXxx()` 建的对象测。

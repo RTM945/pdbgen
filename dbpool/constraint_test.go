@@ -79,7 +79,7 @@ func TestSelectedRecordIsDetached(t *testing.T) {
 
 	var v *ptable.RedEnvelope
 	if err := Query(ctx, func(ctx context.Context) error {
-		v = ptable.UserRedEnvelopeTable.SelectByUidActId(ctx, uid, actId)
+		v = ptable.UserRedEnvelopeTable.GetByUidActId(ctx, uid, actId)
 		return nil
 	}); err != nil {
 		t.Fatalf("查询失败: %v", err)

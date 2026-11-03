@@ -140,15 +140,20 @@ func WithQuerier(ctx context.Context, db string, q Querier) context.Context {
 	return context.WithValue(ctx, querierKey{}, querier{db: db, q: q})
 }
 
-// QuerierFromCtx 返回 dbpool.Query 放进 ctx 的连接池，SelectByXxx / SelectAll 都经过这里。
-// 在事务里调用会 panic：从池里另取一条连接读不到本事务的修改。db 的检查同 SQLTxFromCtx。
-func QuerierFromCtx(ctx context.Context, db string) Querier {
-	if InTransaction(ctx) {
-		panic("pdbgen: SelectByXxx / SelectAll 不能在事务里调用，事务里用 GetByXxx / ListByXxx / GetAll")
+// ReaderFromCtx 返回只读查询用的连接，GetByXxx / ListByXxx / GetAll 和手写的只读查询都经过这里：
+// 在事务里是本事务（读得到本事务还没提交的修改），在 dbpool.Query 里是连接池，所以同一个方法两边都能调。
+// 查出来的行能不能改看 ctx：事务里的登记进事务，Query 里的脱离事务（GetOrAddCachedRecord）。
+// 写操作（Insert、手写的 UPDATE / FOR UPDATE / Exec）只能在事务里，用 SQLTxFromCtx。db 的检查同 SQLTxFromCtx。
+func ReaderFromCtx(ctx context.Context, db string) Querier {
+	if txn, ok := TransactionFromCtxOptional(ctx); ok {
+		if txn.DBName() != db {
+			panicWrongDB("事务", txn.DBName(), db)
+		}
+		return txn.SQLTx()
 	}
 	q, ok := ctx.Value(querierKey{}).(querier)
 	if !ok {
-		panic("pdbgen: SelectByXxx / SelectAll 只能在 dbpool.Query 里调用")
+		panic("pdbgen: 查询只能在 dbpool.Procedure 或 dbpool.Query 里调用")
 	}
 	if q.db != db {
 		panicWrongDB("查询", q.db, db)

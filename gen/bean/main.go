@@ -112,7 +112,7 @@ type field struct {
 
 // queryMethod 是按主键或索引生成的一组查询方法。
 type queryMethod struct {
-	Suffix       string // 方法名去掉 Get / Select / List / SelectList：普通索引是 By<列名>，部分索引是 method
+	Suffix       string // 方法名去掉 Get / List：普通索引是 By<列名>，部分索引是 method
 	Func         string // 内部查询函数名：普通索引 query<列名>，部分索引 queryWhere<method>
 	Params       string // uid int64, actId int32；没有 variable 的部分索引为空
 	Args         string // uid, actId
@@ -364,8 +364,8 @@ func buildTableGen(schema *readxml.Schema, table readxml.Table) (tableGen, error
 	gen.InsertColumns = strings.Join(insertCols, ", ")
 	gen.InsertValues = strings.Join(insertValues, ", ")
 
-	// 查询方法：主键固定生成 GetById / SelectById；unique 索引生成 GetByXxx / SelectByXxx，
-	// 非 unique 索引生成 ListByXxx / SelectListByXxx；部分索引（有 where）按 method 命名：Get<method> / List<method>。
+	// 查询方法：主键固定生成 GetById；unique 索引生成 GetByXxx，非 unique 索引生成 ListByXxx；
+	// 部分索引（有 where）按 method 命名：Get<method> / List<method>。事务里、dbpool.Query 里都能调（dbctx.ReaderFromCtx）。
 	// 同一组列加同样的条件只能有一个查询。
 	pkQuery := gen.newQuery([]field{gen.PK}, nil, true, "")
 	pkQuery.IsPrimaryKey = true

@@ -39,7 +39,7 @@ err = dbpool.Procedure(ctx, dbpool.ProcedureOptions{Lock: dbpool.TryAdvisoryLock
 
 // 事务外的只读查询
 err = dbpool.Query(ctx, func(ctx context.Context) error {
-    mails = ptable.UserMailTable.SelectListByUidConfId(ctx, uid, confID)
+    mails = ptable.UserMailTable.ListByUidConfId(ctx, uid, confID) // 同一个方法，事务里、Query 里都能调
     return nil
 })
 
@@ -73,7 +73,7 @@ err = logDB.WithTx(ctx, func(ctx context.Context) error {
     <!-- lock="uid"：每一行归 uid 那把咨询锁管，不持有它的事务只能读 -->
     <table name="user_red_envelope" bean="RedEnvelope" lock="uid">
         <primaryKey variable="id" autoIncrement="true"/>
-        <index variable="uid,actId" unique="true"/> 生成 GetByUidActId / SelectByUidActId
+        <index variable="uid,actId" unique="true"/> 生成 GetByUidActId
     </table>
 </pdb>
 ```

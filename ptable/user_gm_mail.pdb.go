@@ -232,15 +232,11 @@ func (t gMMail) queryId(ctx context.Context, q dbctx.Querier, id int64) *GMMail 
 }
 
 func (t gMMail) GetById(ctx context.Context, id int64) *GMMail {
-	tx := dbctx.SQLTxFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
+	q := dbctx.ReaderFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
 	if o, ok := dbctx.GetCachedRecordAs[*GMMail](ctx, "user_gm_mail", id); ok {
 		return o
 	}
-	return t.queryId(ctx, tx, id)
-}
-
-func (t gMMail) SelectById(ctx context.Context, id int64) *GMMail {
-	return t.queryId(ctx, dbctx.QuerierFromCtx(ctx, DBName), id)
+	return t.queryId(ctx, q, id)
 }
 
 // DeleteById 按主键标记删除，提交前 flush 成 DELETE；找不到返回 false。
@@ -256,11 +252,7 @@ func (t gMMail) DeleteById(ctx context.Context, id int64) bool {
 const selectAllGMMail = "SELECT " + selectColumnsGMMail + " FROM \"public\".\"user_gm_mail\""
 
 func (t gMMail) GetAll(ctx context.Context) []*GMMail {
-	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx, DBName), selectAllGMMail, scanGMMail)
-}
-
-func (t gMMail) SelectAll(ctx context.Context) []*GMMail {
-	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx, DBName), selectAllGMMail, scanGMMail)
+	return dbctx.QueryList(ctx, dbctx.ReaderFromCtx(ctx, DBName), selectAllGMMail, scanGMMail)
 }
 
 // Insert 插入一个 NewGMMail() 创建的新对象，主键由数据库生成并回填。

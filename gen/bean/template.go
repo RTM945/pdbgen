@@ -172,25 +172,17 @@ func (t {{ $.ReceiverName }}) {{ .Func }}(ctx context.Context, q dbctx.Querier{{
 }
 {{ if .IsList }}
 func (t {{ $.ReceiverName }}) List{{ .Suffix }}(ctx context.Context{{ if .Params }}, {{ .Params }}{{ end }}) []*{{ $.TypeName }} {
-	return t.{{ .Func }}(ctx, dbctx.SQLTxFromCtx(ctx, DBName){{ if .Args }}, {{ .Args }}{{ end }})
-}
-
-func (t {{ $.ReceiverName }}) SelectList{{ .Suffix }}(ctx context.Context{{ if .Params }}, {{ .Params }}{{ end }}) []*{{ $.TypeName }} {
-	return t.{{ .Func }}(ctx, dbctx.QuerierFromCtx(ctx, DBName){{ if .Args }}, {{ .Args }}{{ end }})
+	return t.{{ .Func }}(ctx, dbctx.ReaderFromCtx(ctx, DBName){{ if .Args }}, {{ .Args }}{{ end }})
 }
 {{ else }}
 func (t {{ $.ReceiverName }}) Get{{ .Suffix }}(ctx context.Context, {{ .Params }}) *{{ $.TypeName }} {
-	tx := dbctx.SQLTxFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
+	q := dbctx.ReaderFromCtx(ctx, DBName) // 先查库对不对，再查缓存：别的库的事务里可能有同名表的行
 {{- if .IsPrimaryKey }}
 	if o, ok := dbctx.GetCachedRecordAs[*{{ $.TypeName }}](ctx, "{{ $.TableName }}", {{ .Args }}); ok {
 		return o
 	}
 {{- end }}
-	return t.{{ .Func }}(ctx, tx, {{ .Args }})
-}
-
-func (t {{ $.ReceiverName }}) Select{{ .Suffix }}(ctx context.Context, {{ .Params }}) *{{ $.TypeName }} {
-	return t.{{ .Func }}(ctx, dbctx.QuerierFromCtx(ctx, DBName), {{ .Args }})
+	return t.{{ .Func }}(ctx, q, {{ .Args }})
 }
 {{ end }}
 {{- end }}
@@ -207,11 +199,7 @@ func (t {{ .ReceiverName }}) DeleteBy{{ .PK.MethodName }}(ctx context.Context, {
 const selectAll{{ .TypeName }} = "SELECT " + selectColumns{{ .TypeName }} + " FROM {{ .SQLTable }}"
 
 func (t {{ .ReceiverName }}) GetAll(ctx context.Context) []*{{ .TypeName }} {
-	return dbctx.QueryList(ctx, dbctx.SQLTxFromCtx(ctx, DBName), selectAll{{ .TypeName }}, scan{{ .TypeName }})
-}
-
-func (t {{ .ReceiverName }}) SelectAll(ctx context.Context) []*{{ .TypeName }} {
-	return dbctx.QueryList(ctx, dbctx.QuerierFromCtx(ctx, DBName), selectAll{{ .TypeName }}, scan{{ .TypeName }})
+	return dbctx.QueryList(ctx, dbctx.ReaderFromCtx(ctx, DBName), selectAll{{ .TypeName }}, scan{{ .TypeName }})
 }
 
 // Insert 插入一个 New{{ .TypeName }}() 创建的新对象，主键由数据库生成并回填。

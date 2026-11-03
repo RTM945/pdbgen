@@ -59,7 +59,7 @@ pdbgen 是面向游戏服务端的 PostgreSQL 数据访问框架：`pdb.xml` 定
 
 - 命中时返回已有对象，**丢弃**这次新扫描出来的对象；
 - 未命中时把它放进事务缓存并返回；
-- 非事务查询（`SelectXxx`）没有 Transaction，直接返回扫描出来的对象，并把它标记为脱离事务（见 2.7）。
+- 在 `dbpool.Query` 里查询没有 Transaction，直接返回扫描出来的对象，并把它标记为脱离事务（见 2.7）。
 
 这对应 xdb 的两步：`Transaction.getCachedTRecord` 命中就直接用，未命中再 `addCachedTRecord`；生成的实体相当于 xdb 的 `TRecord`。
 
@@ -109,15 +109,16 @@ b.SetTotal(42)
 
 业务自己用 `dbctx.SQLTxFromCtx(ctx, ptable.DBName)` 执行的 SQL 照常返回 error，由业务决定怎么处理。
 
-### 2.5 `GetXxx` 与 `SelectXxx` 互斥
+### 2.5 查询按 ctx 取连接
 
-| | 必须在事务里 | 用哪条连接 | 参与身份表解析 | 返回的实体 |
-|---|---|---|---|---|
-| `GetByXxx` / `ListByXxx` / `GetAll` / `Insert` | 是（否则 panic） | 事务 | 是 | 可以改 |
-| `SelectByXxx` / `SelectListByXxx` / `SelectAll` | 否（是则 panic），且必须在 `dbpool.Query` 里 | 连接池 | 否 | 只读（脱离事务） |
-| `dbpool.Query` | 否（是则报错） | 连接池 | 否 | — |
+| 在哪里调 | 用哪条连接 | 参与身份表解析 | 返回的实体 |
+|---|---|---|---|
+| `GetByXxx` / `ListByXxx` / `GetAll`，在事务里 | 事务 | 是 | 可以改 |
+| 同上，在 `dbpool.Query` 里 | 连接池 | 否 | 只读（脱离事务） |
+| `Insert`、手写的写操作 | 只能在事务里（否则 panic） | 事务 | — |
+| `dbpool.Query` 本身 | 不能在事务里（是则报错） | 连接池 | — |
 
-事务里从池里另取一条连接读数据，会读到事务未提交前的旧值——所以框架直接把这条路封死。
+查询方法只有一个版本，连接由 `dbctx.ReaderFromCtx` 按 ctx 取：事务里用本事务，读得到本事务还没提交的修改；不会在事务里从池里另取一条连接读到旧值。两边都不在时 panic。
 
 ### 2.6 失败时恢复内存对象
 
@@ -135,8 +136,9 @@ b.SetTotal(42)
 | 改事务外查出来的实体，或者改已经结束的事务里的实体 | `SetXxx` / `Delete` panic：实体已脱离事务，改了也不会落库 |
 | 改了查询条件列之后再按这些列查同一张表 | panic（见 2.3） |
 | 改声明了 `lock` 的表的行，却没有持有保护这一行的锁 | `SetXxx` / `Delete` panic（见 2.8） |
-| 事务外调用 `GetByXxx` / `Insert` / `dbctx.AfterCommit` / `dbctx.AfterRollback` | panic |
-| 事务里调用 `SelectByXxx` / `dbpool.Query` | panic / 返回 `ErrInTransaction` |
+| 事务外调用 `Insert` / `dbctx.AfterCommit` / `dbctx.AfterRollback` | panic |
+| 既不在事务里也不在 `dbpool.Query` 里调用 `GetByXxx` / `ListByXxx` / `GetAll` | panic |
+| 事务里调用 `dbpool.Query` | 返回 `ErrInTransaction` |
 | `Insert` 一个已经插入过或者查出来的对象 | panic |
 | 删了再插同一个唯一键 | 数据库报唯一约束冲突，事务回滚，返回 23505 |
 | 没有 `Open` / `Init`（或者已经 `Close`）就开事务、查询 | 返回 `ErrNotOpen` |
@@ -173,7 +175,7 @@ b.SetTotal(42)
 
 包级函数用的是默认句柄：`dbpool.Open(ctx, Config)` 打开，`dbpool.Init(ctx, schema)` 是用 `pdb.xml` 根元素上的参数打开（`Open(ctx, SchemaConfig(schema))`），`dbpool.Close()` 关掉。同一时刻只有一个默认句柄，再 `Open` 返回 `ErrAlreadyOpen`；没打开时 `Procedure` / `Query` 返回 `ErrNotOpen`。`Close` 之后可以再 `Open`。
 
-- **再连别的库**：`dbpool.New(ctx, Config) (*DB, error)` 开一个句柄，`DB` 的 `Procedure` / `WithTx` / `Query` / `Close` / `Stats` 和包级函数一样，各用各的连接池和参数。每个 `pdb.xml` 写一个不同的 `name`（只连一个库可以不写），`Config.Name` 取它；生成器把它生成成包里的常量 `DBName`（文件 `pdb.pdb.go`）。事务和 `Query` 放进 ctx 的连接池都记着自己是哪个库开的，`dbctx.SQLTxFromCtx(ctx, db)` / `QuerierFromCtx(ctx, db)` 按库名取，对不上直接 panic（误用，见 2.7）：否则在 A 库的事务里查 B 库的表，SQL 会发到 A 库上，到运行时才报"表不存在"，同名的表还会读写错。生成的 `GetById` 先取事务、再查缓存，同理。不同库的事务不能嵌套（`ErrNestedTransaction`），也不会一起提交。
+- **再连别的库**：`dbpool.New(ctx, Config) (*DB, error)` 开一个句柄，`DB` 的 `Procedure` / `WithTx` / `Query` / `Close` / `Stats` 和包级函数一样，各用各的连接池和参数。每个 `pdb.xml` 写一个不同的 `name`（只连一个库可以不写），`Config.Name` 取它；生成器把它生成成包里的常量 `DBName`（文件 `pdb.pdb.go`）。事务和 `Query` 放进 ctx 的连接池都记着自己是哪个库开的，`dbctx.SQLTxFromCtx(ctx, db)` / `ReaderFromCtx(ctx, db)` 按库名取，对不上直接 panic（误用，见 2.7）：否则在 A 库的事务里查 B 库的表，SQL 会发到 A 库上，到运行时才报"表不存在"，同名的表还会读写错。生成的 `GetById` 先取事务、再查缓存，同理。不同库的事务不能嵌套（`ErrNestedTransaction`），也不会一起提交。
 
 - **零值用默认值**：`Config`（以及 `pdb.xml`）里没写的连接池参数沿用 pgx 的默认值（连接串里的 `pool_max_conns` 等参数照常生效），只有写了的才覆盖。负数、`MinConns` 大于 `MaxConns` 时 `Open` 报错。以前没写的属性被当成 0 覆盖上去：`poolHealthCheckPeriod` 没写时 pgx 的后台 goroutine 会 panic，整个进程崩掉；`poolMaxConnLifetime` 没写时连接永不过期。
 - `statementTimeoutMs` / `idleInTransactionSessionTimeoutMs` / `lockTimeoutMs` 拼进 BEGIN：`BEGIN; SET LOCAL statement_timeout = ...; ...`。不带参数的 Exec 走简单协议，一次往返发完，所以**每个事务都有这三个超时**，加不加锁都一样，也不多花往返。不足 1ms 的超时按 1ms 下发（PostgreSQL 里 0 表示不限）。
@@ -245,12 +247,12 @@ Procedure(ctx, ProcedureOptions{Lock: AdvisoryLock2(ns, id)}, fn)      // 双 in
 | 生成物 | 说明 |
 |---|---|
 | `NewXxx()` | 新对象，还没有身份；`SetXxx` 之后 `Insert` |
-| `GetById` / `SelectById` | 主键查询；`GetById` 在事务里先查身份表，命中不发 SQL |
+| `GetById` | 主键查询；在事务里先查身份表，命中不发 SQL |
 | `DeleteById` | 先 `GetById`（缓存优先），找不到返回 false；找到后标记删除 |
-| `GetByYyy` / `SelectByYyy` | **unique 索引**查询（`index unique="true"`） |
-| `ListByYyy` / `SelectListByYyy` | **非 unique 索引**查询，返回 `[]*Xxx` |
-| `List<Method>` / `SelectList<Method>`，unique 时 `Get<Method>` / `Select<Method>` | **部分索引**查询（`index where="..." method="..."`），参数是 `variable` 里的列，条件常量写死在 SQL 里 |
-| `GetAll` / `SelectAll` | 全表，返回 `[]*Xxx`。不分页：事务里的 `GetAll` 会把每一行都登记进身份表、拍一份快照，只用在小表上（配置、全服邮件），大表用索引查询 |
+| `GetByYyy` | **unique 索引**查询（`index unique="true"`） |
+| `ListByYyy` | **非 unique 索引**查询，返回 `[]*Xxx` |
+| `List<Method>`，unique 时 `Get<Method>` | **部分索引**查询（`index where="..." method="..."`），参数是 `variable` 里的列，条件常量写死在 SQL 里 |
+| `GetAll` | 全表，返回 `[]*Xxx`。不分页：事务里的 `GetAll` 会把每一行都登记进身份表、拍一份快照，只用在小表上（配置、全服邮件），大表用索引查询 |
 | `SetXxx` / `Xxx()` | 写入（值没变不置脏位；实体脱离事务时 panic）/ 读取 |
 | `Delete()` / `IsDeleted()` | 标记删除 / 查询删除状态 |
 | `Insert()` | `INSERT ... RETURNING <pk>`（经 `dbctx.InsertReturning`，出错时见 2.4），只接受还没插入过的新对象 |
@@ -294,6 +296,15 @@ genddl 的输出包在 `BEGIN; ... COMMIT;` 里（PostgreSQL 的 DDL 是事务�
 - **Procedure 与 Transaction 的职责划分与命名**：[design-procedure-transaction.md](design-procedure-transaction.md)（提案，Phase 1-5 已实施）。实施时并入本文正文，并在变更记录里留痕。
 
 ## 7. 变更记录
+
+### 2026-11-03 查询不再分 Get / Select：按 ctx 取连接
+- **改了什么**：
+  - `dbctx.QuerierFromCtx` 换成 `ReaderFromCtx(ctx, db)`：在事务里返回本事务，在 `dbpool.Query` 里返回连接池，都不在时 panic，库名检查不变。
+  - 生成器不再生成 `SelectById` / `SelectByXxx` / `SelectListByXxx` / `Select<Method>` / `SelectList<Method>` / `SelectAll`；`GetByXxx` / `ListByXxx` / `GetAll` 改用 `ReaderFromCtx`，事务里、`dbpool.Query` 里都能调。`SQLTxFromCtx` 只留给 `Insert` 和手写的写操作。
+  - example 的 `redenvelope.Get` 不再按 readonly 分派两个方法。
+- **为什么**：Get / Select 两套方法要使用方先判断"现在在不在事务里"再选名字，手写查询（使用方的 `ext_*.go`）也要每条写两份、选两种取连接的函数，已经出现过写漏 `CheckPredicate` 的。原来禁止事务里用连接池，是怕从池里另取连接读到旧值；在事务里改用本事务的连接，这个问题就不存在了。返回的实体能不能改本来就由 `GetOrAddCachedRecord` 按 ctx 决定，误改照样 panic。
+- **影响范围**：`Select*` 方法和 `dbctx.QuerierFromCtx` 删了，使用方重新生成后要把调用改成 `Get*` / `List*` / `GetAll`、`ReaderFromCtx`，不改编不过。行为上的变化：`GetByXxx` 等在 `dbpool.Query` 里不再 panic；`Select*` 在事务里的 panic 随方法一起没了。`dbpool.Query` 在事务里照旧返回 `ErrInTransaction`。
+- **验证状态**：`go vet`、`PDBGEN_REQUIRE_DB=1 go test ./...` 通过（本地 PG）。`TestQuerierFromCtx` 换成 `TestReaderFromCtx`（Query 里用连接池；事务优先于外层 Query 的连接池；都不在时 panic），`TestWrongDB` 改测 `ReaderFromCtx`，生成器测试加了"不再生成 Select"。`-race` 没跑。`Work/MechAlMond/pdbgen` 和 `Dev/pdbgen` 是同一份改动；go_pg_test 还没同步（它用 `../pdbgen`，即 Dev 那份，重新生成、改调用之前编不过）。
 
 ### 2026-11-03 一个进程连多个库；连错库当场 panic
 - **改了什么**：

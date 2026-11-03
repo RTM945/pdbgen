@@ -87,7 +87,7 @@ type Index struct {
 	// Where 非空就是部分索引（CREATE INDEX ... WHERE）：逗号分隔的 变量=常量，之间是 AND，见 ParseWhere。
 	// 这时 Variable 可以为空（索引建在主键上，查询没有参数）。
 	Where string
-	// Method 是部分索引生成的方法名：List<Method> / SelectList<Method>，unique 时 Get<Method> / Select<Method>。
+	// Method 是部分索引生成的方法名：List<Method>，unique 时 Get<Method>。
 	// 只用于部分索引，必填；普通索引的方法名由列名拼出。
 	Method string
 	// Name 是索引的名字，空表示 idx_<表名>_<列名>（部分索引是 idx_<表名>_where_<method>）。只有 genddl 用：

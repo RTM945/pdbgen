@@ -29,7 +29,7 @@ func TestSecondHandle(t *testing.T) {
 		t.Fatalf("新句柄的事务: %v", err)
 	}
 	if err := other.Query(t.Context(), func(ctx context.Context) error {
-		return dbctx.QuerierFromCtx(ctx, "other").QueryRow(ctx, "SELECT 1").Scan(new(int))
+		return dbctx.ReaderFromCtx(ctx, "other").QueryRow(ctx, "SELECT 1").Scan(new(int))
 	}); err != nil {
 		t.Fatalf("新句柄的查询: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestSecondHandle(t *testing.T) {
 	}
 	if got := catchPanic(t, func() {
 		_ = other.Query(t.Context(), func(ctx context.Context) error {
-			ptable.UserMailTable.SelectById(ctx, 1)
+			ptable.UserMailTable.GetById(ctx, 1)
 			return nil
 		})
 	}); !strings.Contains(got, want) {

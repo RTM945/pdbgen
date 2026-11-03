@@ -246,8 +246,8 @@ func Close() {
 // Close 关掉这个句柄的连接池，重复调用安全，时机同包级的 Close。之后再用它，SQL 返回连接池已关闭的错误。
 func (d *DB) Close() { d.pool.Close() }
 
-// Query 在事务外执行只读回调：SelectByXxx / SelectAll 从连接池读，每次查询各取一条连接。
-// 不能在事务里调用（返回 ErrInTransaction）——事务里改过的数据，从池里另一条连接读不到。
+// Query 在事务外执行只读回调：GetByXxx / ListByXxx / GetAll 从连接池读，每次查询各取一条连接，查出来的行只读。
+// 不能在事务里调用（返回 ErrInTransaction）：事务里直接查就是，读得到本事务的修改。
 //
 // 回调里 SQL 出错时，Query 返回这个错误（回调不需要逐个检查）；回调自己的 panic 原样上抛。
 // 这里没有事务，SET LOCAL 管不到；回调受 TransactionTimeout 限制（超过返回 ErrTimeout），
