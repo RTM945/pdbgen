@@ -180,7 +180,11 @@ b.SetTotal(42)
 - **零值用默认值**：`Config`（以及 `pdb.xml`）里没写的连接池参数沿用 pgx 的默认值（连接串里的 `pool_max_conns` 等参数照常生效），只有写了的才覆盖。负数、`MinConns` 大于 `MaxConns` 时 `Open` 报错。以前没写的属性被当成 0 覆盖上去：`poolHealthCheckPeriod` 没写时 pgx 的后台 goroutine 会 panic，整个进程崩掉；`poolMaxConnLifetime` 没写时连接永不过期。
 - `statementTimeoutMs` / `idleInTransactionSessionTimeoutMs` / `lockTimeoutMs` 拼进 BEGIN：`BEGIN; SET LOCAL statement_timeout = ...; ...`。不带参数的 Exec 走简单协议，一次往返发完，所以**每个事务都有这三个超时**，加不加锁都一样，也不多花往返。不足 1ms 的超时按 1ms 下发（PostgreSQL 里 0 表示不限）。
 - `transactionTimeoutMs` 是客户端预算：一次 `Procedure`（BEGIN 到 COMMIT 前）或一次 `dbpool.Query` 回调的总时长上限。超过时返回 `ErrTimeout`（同时满足 `errors.Is(err, context.DeadlineExceeded)`）；调用方自己的 ctx 到期或被取消时不带 `ErrTimeout`，调用方能分清"服务端慢了"和"客户端走了"。pgx 默认在 ctx 到期时只断开本地连接、**不发 CancelRequest**——服务端的语句要靠 `statement_timeout` 停下来。
-- `dbpool.Query` 没有事务，`SET LOCAL` 管不到；要给它服务端上限，用角色级设置 `ALTER ROLE app SET statement_timeout = '5s'`（经过 pgBouncer 事务池也生效；放在连接参数里会被 pgBouncer 拒绝）。
+- `serverTransactionTimeoutMs`（`Config.ServerTransactionTimeout`）是服务端的兜底：PG 17+ 的 `transaction_timeout`，和另外三个一起拼进 BEGIN。客户端预算到期后，服务端的事务可能还在跑，`statement_timeout` 管不住"每条都不慢、加起来很慢"，也管不住语句之间的空闲；有了它，服务端的事务也有总时长上限。注意：
+    - 它超时是**断开整个会话**（FATAL，SQLSTATE 25P04），不是取消语句。经过 pgBouncer 时，pgBouncer 到 PG 的那条连接会被关掉，所以它只做兜底，必须**大于** `transactionTimeoutMs`（否则 `Open` 报错），让调用方先拿到 `ErrTimeout`。
+    - 默认 0 不下发：PG 17 之前没有这个参数，下发了每个事务都会因为 42704 失败。
+    - 在事务里 `SET LOCAL` 时，从设置的那一刻开始计时，语句之间的空闲也算（PG 18 实测）。比从 BEGIN 开始算晚的只是同一次往返里的时间。
+- `dbpool.Query` 没有事务，`SET LOCAL` 管不到；要给它服务端上限，用角色级设置 `ALTER ROLE app SET statement_timeout = '5s'`（经过 pgBouncer 事务池也生效；放在连接参数里会被 pgBouncer 拒绝）。PG 17+ 也可以在角色上设 `transaction_timeout`，它同样管自动提交的单条语句；事务里的 `SET LOCAL` 会覆盖它。
 - `COMMIT` 不受预算和调用方取消的影响：一旦发出就要等到结果，避免"客户端不知道提交成功没有"导致重试重复发放。但最多等 `commitTimeoutMs`（`Config.CommitTimeout`，默认 30s）：网络半断时 pgx 会一直等到 TCP 超时（Linux 默认十几分钟），请求和连接都挂在那里。等不到结果（超时或连接断开）返回 `ErrCommitUnknown`：可能提交了也可能没有，内存对象不回滚，两种钩子都不执行。ROLLBACK 同样最多等这么久，等不到就关掉连接，由服务端回滚。
 - 咨询锁是**替代 `SELECT ... FOR UPDATE` 的行级串行手段**，在事务开头获取（见 3.1）。玩家请求用 try 版，GM/RPC 写请求用阻塞版（README）。单 bigint 和双 int32 是两个互不重叠的 key 空间。
 
@@ -288,7 +292,7 @@ genddl 的输出包在 `BEGIN; ... COMMIT;` 里（PostgreSQL 的 DDL 是事务�
 1. **嵌套 savepoint / 部分回滚没有实现**：只有事务级回滚，嵌套事务直接拒绝（`ErrNestedTransaction`）。
 2. **咨询锁的 bigint key 空间只有一个**：`TryAdvisoryLock(uid)` 和别的业务用 bigint key 的锁会撞号。约定 bigint 形式只给 uid 用，其他业务锁用 `AdvisoryLock2(ns, id)`。（README 里"uid 超过 int32"的问题已经由单 bigint 形式解决。）
 3. **多咨询锁场景下的加锁/更新顺序**：见第 3 节，当前模型下不适用。
-4. **`dbpool.Query` 没有服务端超时**：只有客户端预算，服务端上限要靠角色级 `statement_timeout`（见第 3 节）。
+4. **`dbpool.Query` 没有服务端超时**：只有客户端预算，服务端上限要靠角色级 `statement_timeout` / `transaction_timeout`（见第 3 节）。
 5. **没写 `lock` 的表，行归哪把锁只靠约定**：持有 A 的锁去改 B 的行不拦，和 B 自己的请求并发时会丢更新。归某个玩家的表都应该写 `lock`（2.8）。
 
 ## 6. 设计提案
@@ -296,6 +300,14 @@ genddl 的输出包在 `BEGIN; ... COMMIT;` 里（PostgreSQL 的 DDL 是事务�
 - **Procedure 与 Transaction 的职责划分与命名**：[design-procedure-transaction.md](design-procedure-transaction.md)（提案，Phase 1-5 已实施）。实施时并入本文正文，并在变更记录里留痕。
 
 ## 7. 变更记录
+
+### 2026-11-04 服务端事务超时 serverTransactionTimeoutMs（PG 17+ transaction_timeout）
+
+- **改了什么**：`pdb.xml` 新增 `serverTransactionTimeoutMs`（`readxml.Schema.ServerTransactionTimeoutMs`、`dbpool.Config.ServerTransactionTimeout`），配了就在 BEGIN 里多拼一条 `SET LOCAL transaction_timeout`。它必须大于 `transactionTimeoutMs`，否则 `Open` / `New` 报错；负数也报错。`buildBeginSQL` 多了一个参数。
+- **为什么**：`transactionTimeoutMs` 只在客户端计时，到期后 pgx 只断开本地连接、不发 CancelRequest，服务端的事务要等到下一条语句或 `statement_timeout`、`idle_in_transaction_session_timeout` 才停。PG 17 有了事务级的 `transaction_timeout`，可以在服务端给事务的总时长兜底。
+- **影响范围**：默认 0，不下发，所有现有配置的行为都不变。只有 PG 17+ 的库可以配：PG 14 上下发的话，每个事务都会因为 42704 失败。服务端超时是断开会话，所以只做兜底，客户端预算仍然是主要的超时机制。
+- **验证状态**：`go build` / `go vet` / `PDBGEN_REQUIRE_DB=1 go test ./...`，在本地 PG 14 上通过，新增的集成测试按版本跳过；临时起了 PG 18 容器，直连跑 `TestServerTransactionTimeoutEndsSlowTransaction` 通过（25P04，约 0.34s）。另用 psql 在 PG 18 上确认：`SET LOCAL` 从设置时开始计时，事务里的空闲也算。
+- **未验证**：经过 pgBouncer 时客户端看到的错误：pgBouncer 可能转发 25P04，也可能直接断开客户端连接。
 
 ### 2026-11-03 查询不再分 Get / Select：按 ctx 取连接
 - **改了什么**：

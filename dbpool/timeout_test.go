@@ -13,17 +13,76 @@ import (
 )
 
 func TestBuildBeginSQL(t *testing.T) {
-	if got := buildBeginSQL(0, 0, 0); got != "BEGIN" {
+	if got := buildBeginSQL(0, 0, 0, 0); got != "BEGIN" {
 		t.Fatalf("没配超时时只有 BEGIN，实际 %q", got)
 	}
 	want := "BEGIN; SET LOCAL statement_timeout = 5000; SET LOCAL lock_timeout = 1000"
-	if got := buildBeginSQL(5*time.Second, 0, time.Second); got != want {
+	if got := buildBeginSQL(5*time.Second, 0, time.Second, 0); got != want {
 		t.Fatalf("期望 %q，实际 %q", want, got)
 	}
 	// 不足 1ms 的超时向上取整：PostgreSQL 里 0 表示不限
 	want = "BEGIN; SET LOCAL idle_in_transaction_session_timeout = 1"
-	if got := buildBeginSQL(0, 300*time.Microsecond, 0); got != want {
+	if got := buildBeginSQL(0, 300*time.Microsecond, 0, 0); got != want {
 		t.Fatalf("期望 %q，实际 %q", want, got)
+	}
+	want = "BEGIN; SET LOCAL transaction_timeout = 8000"
+	if got := buildBeginSQL(0, 0, 0, 8*time.Second); got != want {
+		t.Fatalf("期望 %q，实际 %q", want, got)
+	}
+}
+
+// TestServerTransactionTimeoutMustExceedBudget 服务端的 transaction_timeout 不比客户端预算长时 Open 报错：
+// 否则服务端先断开会话，调用方拿到的是断连而不是 ErrTimeout。
+func TestServerTransactionTimeoutMustExceedBudget(t *testing.T) {
+	for _, tc := range []struct {
+		budget, server time.Duration
+		ok             bool
+	}{
+		{0, 0, true}, {5 * time.Second, 0, true}, {0, 5 * time.Second, true},
+		{5 * time.Second, 8 * time.Second, true},
+		{5 * time.Second, 5 * time.Second, false}, {5 * time.Second, time.Second, false},
+		{0, -1, false},
+	} {
+		_, err := Config{URL: "postgres://x@127.0.0.1/x", TransactionTimeout: tc.budget, ServerTransactionTimeout: tc.server}.poolConfig()
+		if (err == nil) != tc.ok {
+			t.Errorf("TransactionTimeout=%v ServerTransactionTimeout=%v：期望 ok=%v，实际 err=%v", tc.budget, tc.server, tc.ok, err)
+		}
+	}
+}
+
+// TestServerTransactionTimeoutEndsSlowTransaction 每条语句都不慢、加起来超过 transaction_timeout 的事务，
+// 服务端会断开会话。要 PG 17+，更早的库跳过。
+func TestServerTransactionTimeoutEndsSlowTransaction(t *testing.T) {
+	setupTestDB(t)
+	var version int
+	if err := Query(t.Context(), func(ctx context.Context) error {
+		return dbctx.ReaderFromCtx(ctx, ptable.DBName).QueryRow(ctx, "SELECT current_setting('server_version_num')::int").Scan(&version)
+	}); err != nil {
+		t.Fatalf("查版本失败: %v", err)
+	}
+	if version < 170000 {
+		t.Skipf("transaction_timeout 要 PG 17+，测试库是 %d", version)
+	}
+	reopen(t, func(c *Config) {
+		c.StatementTimeout = time.Second
+		c.TransactionTimeout = 0 // 只看服务端
+		c.ServerTransactionTimeout = 300 * time.Millisecond
+	})
+
+	start := time.Now()
+	err := WithTx(t.Context(), func(ctx context.Context) error {
+		for range 10 {
+			if _, err := dbctx.SQLTxFromCtx(ctx, ptable.DBName).Exec(ctx, "SELECT pg_sleep(0.1)"); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); !ok || pgErr.Code != "25P04" {
+		t.Fatalf("期望 transaction_timeout 断开会话（25P04），实际: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 800*time.Millisecond {
+		t.Fatalf("应该在 300ms 左右结束，实际 %v", elapsed)
 	}
 }
 

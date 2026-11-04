@@ -37,6 +37,11 @@ type Schema struct {
 	// PG 17 之前也没有事务级的 GUC，所以只能在客户端这边包一层。
 	TransactionTimeoutMs int
 
+	// ServerTransactionTimeoutMs 是服务端的 transaction_timeout（PG 17+），拼进 BEGIN 兜底：
+	// 客户端预算到期后 pgx 只断开本地连接，服务端的事务要靠它结束。超时时服务端断开整个会话（FATAL）。
+	// 0 不下发（PG 17 之前的库没有这个参数，下发了每个事务都会失败）；配了就必须大于 TransactionTimeoutMs。
+	ServerTransactionTimeoutMs int
+
 	// CommitTimeoutMs 等 COMMIT / ROLLBACK 结果的上限，0 表示用默认值（dbpool.Config.CommitTimeout）。
 	CommitTimeoutMs int
 

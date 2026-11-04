@@ -123,6 +123,7 @@ func (p *parser) schema(root *node) *Schema {
 		"idleInTransactionSessionTimeoutMs": &s.IdleInTransactionSessionTimeoutMs,
 		"lockTimeoutMs":                     &s.LockTimeoutMs,
 		"transactionTimeoutMs":              &s.TransactionTimeoutMs,
+		"serverTransactionTimeoutMs":        &s.ServerTransactionTimeoutMs,
 		"commitTimeoutMs":                   &s.CommitTimeoutMs,
 		"showSQL":                           &s.ShowSQL,
 		"appName":                           &s.AppName,

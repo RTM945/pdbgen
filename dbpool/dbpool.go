@@ -72,6 +72,11 @@ type Config struct {
 	// 超过时返回 ErrTimeout。statement_timeout 只管单条语句，很多条语句加起来慢它拦不住。
 	TransactionTimeout time.Duration
 
+	// ServerTransactionTimeout 是拼进 BEGIN 的服务端 transaction_timeout（PG 17+），客户端预算到期后
+	// 管住服务端还在跑的事务；超时时服务端断开整个会话。0 不下发，PG 17 之前的库必须是 0。
+	// 配了就必须大于 TransactionTimeout，保证调用方先拿到 ErrTimeout。
+	ServerTransactionTimeout time.Duration
+
 	// CommitTimeout 是等 COMMIT / ROLLBACK 结果的上限，默认 30s。COMMIT 等不到结果按 ErrCommitUnknown 处理。
 	CommitTimeout time.Duration
 
@@ -98,6 +103,7 @@ func SchemaConfig(s *readxml.Schema) Config {
 		IdleInTransactionSessionTimeout: ms(s.IdleInTransactionSessionTimeoutMs),
 		LockTimeout:                     ms(s.LockTimeoutMs),
 		TransactionTimeout:              ms(s.TransactionTimeoutMs),
+		ServerTransactionTimeout:        ms(s.ServerTransactionTimeoutMs),
 		CommitTimeout:                   ms(s.CommitTimeoutMs),
 		ShowSQL:                         s.ShowSQL,
 	}
@@ -118,11 +124,16 @@ func (c Config) poolConfig() (*pgxpool.Config, error) {
 		{"IdleInTransactionSessionTimeout", c.IdleInTransactionSessionTimeout < 0},
 		{"LockTimeout", c.LockTimeout < 0},
 		{"TransactionTimeout", c.TransactionTimeout < 0},
+		{"ServerTransactionTimeout", c.ServerTransactionTimeout < 0},
 		{"CommitTimeout", c.CommitTimeout < 0},
 	} {
 		if f.negative {
 			return nil, fmt.Errorf("dbpool: Config.%s must not be negative", f.name)
 		}
+	}
+	if c.ServerTransactionTimeout > 0 && c.TransactionTimeout > 0 && c.ServerTransactionTimeout <= c.TransactionTimeout {
+		return nil, fmt.Errorf("dbpool: ServerTransactionTimeout %v must be greater than TransactionTimeout %v",
+			c.ServerTransactionTimeout, c.TransactionTimeout)
 	}
 
 	pc, err := pgxpool.ParseConfig(c.URL)
@@ -180,7 +191,7 @@ func New(ctx context.Context, cfg Config) (*DB, error) {
 	}
 	d := &DB{
 		name:          cfg.Name,
-		beginSQL:      buildBeginSQL(cfg.StatementTimeout, cfg.IdleInTransactionSessionTimeout, cfg.LockTimeout),
+		beginSQL:      buildBeginSQL(cfg.StatementTimeout, cfg.IdleInTransactionSessionTimeout, cfg.LockTimeout, cfg.ServerTransactionTimeout),
 		budget:        cfg.TransactionTimeout,
 		commitTimeout: cmp.Or(cfg.CommitTimeout, defaultCommitTimeout),
 		showSQL:       cfg.ShowSQL,
@@ -213,9 +224,10 @@ func Init(ctx context.Context, pdb *readxml.Schema) error {
 }
 
 // buildBeginSQL 拼出每个事务的开头：BEGIN 加上 SET LOCAL。不带参数的 Exec 走简单协议，
-// 多条语句一次往返发完——所以无论加不加锁，三个超时都生效，也不多花往返。
+// 多条语句一次往返发完——所以无论加不加锁，这几个超时都生效，也不多花往返。
+// transaction_timeout 在事务里 SET LOCAL 时从这一刻开始计时（PG 18 实测），和从 BEGIN 算只差这一次往返。
 // 超时按毫秒向上取整：PostgreSQL 里 0 表示不限，不足 1ms 的超时不能变成 0。
-func buildBeginSQL(statementTimeout, idleInTransactionSessionTimeout, lockTimeout time.Duration) string {
+func buildBeginSQL(statementTimeout, idleInTransactionSessionTimeout, lockTimeout, transactionTimeout time.Duration) string {
 	var b strings.Builder
 	b.WriteString("BEGIN")
 	for _, s := range []struct {
@@ -225,6 +237,7 @@ func buildBeginSQL(statementTimeout, idleInTransactionSessionTimeout, lockTimeou
 		{"statement_timeout", statementTimeout},
 		{"idle_in_transaction_session_timeout", idleInTransactionSessionTimeout},
 		{"lock_timeout", lockTimeout},
+		{"transaction_timeout", transactionTimeout},
 	} {
 		if s.d > 0 {
 			fmt.Fprintf(&b, "; SET LOCAL %s = %d", s.name, (s.d+time.Millisecond-1)/time.Millisecond)
@@ -251,7 +264,7 @@ func (d *DB) Close() { d.pool.Close() }
 //
 // 回调里 SQL 出错时，Query 返回这个错误（回调不需要逐个检查）；回调自己的 panic 原样上抛。
 // 这里没有事务，SET LOCAL 管不到；回调受 TransactionTimeout 限制（超过返回 ErrTimeout），
-// 服务端的上限要靠角色级的 statement_timeout（见 docs/design.md）。
+// 服务端的上限要靠角色级的 statement_timeout / transaction_timeout（见 docs/design.md）。
 func Query(ctx context.Context, fn func(context.Context) error) error {
 	d := active.Load()
 	if d == nil {
