@@ -1,6 +1,7 @@
 // genddl 读 pdb.xml，连上 url 指的库读出真实的表结构，把要执行的 DDL 打到 stdout（不执行）：
 //
 //	go run pdbgen/gen/ddl -schema path/to/pdb.xml > ddl.sql
+//	go run pdbgen/gen/ddl -schema path/to/pdb.xml -url "$DB_URL" > ddl.sql   # 连别的库（url 带密码，不写进 pdb.xml）
 //
 // 只做增量：缺的 schema、表、列、主键、索引才生成；已有的只校验，对不上就报错，不改类型、不 DROP、不重建。
 // 输出包在一个事务里（PostgreSQL 的 DDL 是事务性的），执行到一半失败不会留下半套结构。
@@ -50,18 +51,22 @@ type DBIndex struct {
 
 func main() {
 	schemaFile := flag.String("schema", "./pdb.xml", "pdb.xml 的路径")
+	url := flag.String("url", "", "连这个库，代替 pdb.xml 里的 url（带密码的 url 不写进 pdb.xml 时用）；空 = 用 pdb.xml 的")
 	flag.Parse()
 
-	if err := run(*schemaFile, os.Stdout); err != nil {
+	if err := run(*schemaFile, *url, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "genddl:", err)
 		os.Exit(1)
 	}
 }
 
-func run(schemaFile string, out io.Writer) error {
+func run(schemaFile, url string, out io.Writer) error {
 	schema, err := readxml.LoadSchema(schemaFile)
 	if err != nil {
 		return err
+	}
+	if url != "" {
+		schema.URL = url
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
