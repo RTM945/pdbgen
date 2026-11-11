@@ -85,6 +85,8 @@ err = logDB.WithTx(ctx, func(ctx context.Context) error {
 ```bash
 go run ./gen/bean -schema ./pdb.xml           # 生成 ptable/<表名>.pdb.go，删掉不再需要的生成文件
 go run ./gen/ddl -schema ./pdb.xml > ddl.sql  # 对照库里的结构生成增量 DDL（包在一个事务里），检查后手工执行
+go run ./gen/ddl -schema new.xml -base old.xml > ddl.sql   # 不连库：old.xml 建出来的库升到 new.xml 的增量
+go run ./gen/ddl -schema ./pdb.xml -base empty > ddl.sql   # 不连库：完整的建表语句
 ```
 
 在用 pdbgen 的项目里，把两个生成器登记成工具，版本跟着 go.mod 走：

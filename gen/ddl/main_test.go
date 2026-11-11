@@ -4,12 +4,126 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"pdbgen/readxml"
 )
+
+// diffTables 比较两份表结构，返回第一处不同（空 = 一样）。部分索引的条件按 normalizePredicate 比：库里存的是 PostgreSQL 反解的写法。
+func diffTables(want, got map[string]*DBTable) string {
+	if len(want) != len(got) {
+		return fmt.Sprintf("表的数量 want=%d got=%d", len(want), len(got))
+	}
+	for name, w := range want {
+		g, ok := got[name]
+		if !ok {
+			return "少了表 " + name
+		}
+		if !reflect.DeepEqual(w.Columns, g.Columns) {
+			return fmt.Sprintf("表 %s 的列 want=%v got=%v", name, w.Columns, g.Columns)
+		}
+		if !reflect.DeepEqual(w.PrimaryKey, g.PrimaryKey) {
+			return fmt.Sprintf("表 %s 的主键 want=%v got=%v", name, w.PrimaryKey, g.PrimaryKey)
+		}
+		if len(w.Indexes) != len(g.Indexes) {
+			return fmt.Sprintf("表 %s 的索引 want=%v got=%v", name, w.Indexes, g.Indexes)
+		}
+		for indexName, wi := range w.Indexes {
+			gi, ok := g.Indexes[indexName]
+			if !ok || wi.Unique != gi.Unique || !reflect.DeepEqual(wi.Columns, gi.Columns) ||
+				normalizePredicate(wi.Where) != normalizePredicate(gi.Where) {
+				return fmt.Sprintf("表 %s 的索引 %s want=%v got=%v", name, indexName, wi, gi)
+			}
+		}
+	}
+	return ""
+}
+
+// TestGenerateFromBase 不连库：-base empty 打出完整建表语句，-base 同一份什么都不做，-base 旧版本打出增量，定义对不上报错。
+func TestGenerateFromBase(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, state, unique, extra string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		xml := `<pdb schema="game">
+  <bean name="Probe">
+    <variable name="id" type="int64"/>
+    <variable name="uid" type="int64"/>
+    <variable name="state" type="` + state + `"/>` + extra + `
+  </bean>
+  <table name="probe" bean="Probe">
+    <primaryKey variable="id" autoIncrement="true" start="1000"/>
+    <index variable="uid" unique="` + unique + `"/>
+  </table>
+</pdb>`
+		if err := os.WriteFile(path, []byte(xml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	v1 := write("v1.xml", "int32", "true", "")
+	v2 := write("v2.xml", "int32", "true", `
+    <variable name="flag" type="bool"/>`)
+	gen := func(schema, base string) (string, error) {
+		var out strings.Builder
+		err := run(schema, "", base, &out)
+		return out.String(), err
+	}
+	statements := func(ddl string) []string {
+		var lines []string
+		for line := range strings.Lines(ddl) {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "--") && line != "BEGIN;" && line != "COMMIT;" && !strings.HasPrefix(line, "CREATE SCHEMA") {
+				lines = append(lines, line)
+			}
+		}
+		return lines
+	}
+
+	full, err := gen(v1, baseEmpty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`CREATE TABLE IF NOT EXISTS "game"."probe"`, `ADD GENERATED ALWAYS AS IDENTITY (START WITH 1000)`, `CREATE UNIQUE INDEX IF NOT EXISTS "idx_probe_uid"`} {
+		if !strings.Contains(full, want) {
+			t.Fatalf("-base empty 应该有 %q:\n%s", want, full)
+		}
+	}
+	if same, err := gen(v1, v1); err != nil || len(statements(same)) != 0 {
+		t.Fatalf("-base 同一份不该有语句: %v\n%s", err, same)
+	}
+	upgrade, err := gen(v2, v1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := statements(upgrade); len(got) != 2 || got[0] != `ALTER TABLE "game"."probe"` || got[1] != `ADD COLUMN "flag" BOOLEAN NOT NULL DEFAULT false;` {
+		t.Fatalf("v1 → v2 应该只加一列，实际:\n%s", upgrade)
+	}
+	if _, err := gen(write("v3.xml", "int64", "true", ""), v1); err == nil || !strings.Contains(err.Error(), "column state type mismatch") {
+		t.Fatalf("改类型应该报错，实际: %v", err)
+	}
+	if _, err := gen(write("v4.xml", "int32", "false", ""), v1); err == nil || !strings.Contains(err.Error(), "index idx_probe_uid definition mismatch") {
+		t.Fatalf("改索引定义应该报错，实际: %v", err)
+	}
+	other := filepath.Join(dir, "other.xml")
+	os.WriteFile(other, []byte(strings.Replace(mustRead(t, v1), `schema="game"`, `schema="other"`, 1)), 0o644)
+	if ddl, err := gen(v1, other); err != nil || !strings.Contains(ddl, "CREATE TABLE") {
+		t.Fatalf("base 在别的 schema 时当没有表，应该整张建: %v\n%s", err, ddl)
+	}
+}
+
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
 
 func TestSQLType(t *testing.T) {
 	cases := []struct {
@@ -261,6 +375,22 @@ func TestGenerateAgainstDatabase(t *testing.T) {
 		}
 	}
 
+	// -base 不连库时用的表结构，要和库里实际读出来的一样
+	matchesDatabase := func(s *readxml.Schema) {
+		t.Helper()
+		got, err := inspectDatabase(ctx, conn, schemaName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := tablesFromSchema(s, schemaName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if diff := diffTables(want, got); diff != "" {
+			t.Fatalf("tablesFromSchema 和库里读出来的不一样：%s", diff)
+		}
+	}
+
 	v1 := parse("int32", "true", "")
 	mustContain(apply(v1),
 		`CREATE TABLE IF NOT EXISTS "`+schemaName+`"."probe"`,
@@ -268,6 +398,7 @@ func TestGenerateAgainstDatabase(t *testing.T) {
 		`CREATE UNIQUE INDEX IF NOT EXISTS "idx_probe_uid"`,
 	)
 	nothingToDo(v1)
+	matchesDatabase(v1)
 
 	var id int64
 	if err := conn.QueryRow(ctx, `INSERT INTO "`+schemaName+`"."probe" ("uid", "state") VALUES (1, 0) RETURNING "id"`).Scan(&id); err != nil || id != 1000 {
@@ -283,6 +414,7 @@ func TestGenerateAgainstDatabase(t *testing.T) {
 		`CREATE INDEX IF NOT EXISTS "idx_probe_where_flagged" ON "`+schemaName+`"."probe" ("id") WHERE "flag"`,
 	)
 	nothingToDo(v2)
+	matchesDatabase(v2)
 
 	// 已有的列和索引只校验：对不上就报错（带 pdb.xml 的行号），不改表
 	if _, err := generate(ctx, parse("int64", "true", ""), conn); err == nil || !strings.Contains(err.Error(), "pdb.xml:5: table probe column state type mismatch") {

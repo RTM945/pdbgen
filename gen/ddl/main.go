@@ -2,6 +2,8 @@
 //
 //	go run pdbgen/gen/ddl -schema path/to/pdb.xml > ddl.sql
 //	go run pdbgen/gen/ddl -schema path/to/pdb.xml -url "$DB_URL" > ddl.sql   # 连别的库（url 带密码，不写进 pdb.xml）
+//	go run pdbgen/gen/ddl -schema new/pdb.xml -base old/pdb.xml > ddl.sql   # 不连库：从 old 建出来的库升到 new 的增量
+//	go run pdbgen/gen/ddl -schema path/to/pdb.xml -base empty > ddl.sql      # 不连库：完整的建表语句
 //
 // 只做增量：缺的 schema、表、列、主键、索引才生成；已有的只校验，对不上就报错，不改类型、不 DROP、不重建。
 // 输出包在一个事务里（PostgreSQL 的 DDL 是事务性的），执行到一半失败不会留下半套结构。
@@ -52,17 +54,40 @@ type DBIndex struct {
 func main() {
 	schemaFile := flag.String("schema", "./pdb.xml", "pdb.xml 的路径")
 	url := flag.String("url", "", "连这个库，代替 pdb.xml 里的 url（带密码的 url 不写进 pdb.xml 时用）；空 = 用 pdb.xml 的")
+	base := flag.String("base", "", "不连库，当库里是另一份 pdb.xml 用 genddl 建出来的样子（打两个版本之间的增量）；"+
+		"empty = 空库（打完整的建表语句）；空 = 连库")
 	flag.Parse()
 
-	if err := run(*schemaFile, *url, os.Stdout); err != nil {
+	if err := run(*schemaFile, *url, *base, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "genddl:", err)
 		os.Exit(1)
 	}
 }
 
-func run(schemaFile, url string, out io.Writer) error {
+// baseEmpty 是 -base 的特殊值：当库是空的
+const baseEmpty = "empty"
+
+func run(schemaFile, url, base string, out io.Writer) error {
 	schema, err := readxml.LoadSchema(schemaFile)
 	if err != nil {
+		return err
+	}
+	if base != "" {
+		existing := map[string]*DBTable{}
+		if base != baseEmpty {
+			baseSchema, err := readxml.LoadSchema(base)
+			if err != nil {
+				return err
+			}
+			if existing, err = tablesFromSchema(baseSchema, schema.Schema); err != nil {
+				return err
+			}
+		}
+		ddl, err := generateFrom(schema, existing)
+		if err != nil {
+			return err
+		}
+		_, err = io.WriteString(out, ddl)
 		return err
 	}
 	if url != "" {
@@ -156,13 +181,65 @@ func checkNames(schema *readxml.Schema) error {
 	return nil
 }
 
-// generate 生成 DDL。输出包在 BEGIN / COMMIT 里：中途有一条失败，整个脚本都不生效。
+// generate 读出库里 schema 下现有的表结构，生成 DDL。
 func generate(ctx context.Context, schema *readxml.Schema, conn *pgx.Conn) (string, error) {
-	if err := checkNames(schema); err != nil {
-		return "", err
-	}
 	dbTables, err := inspectDatabase(ctx, conn, schema.Schema)
 	if err != nil {
+		return "", err
+	}
+	return generateFrom(schema, dbTables)
+}
+
+// tablesFromSchema 返回 base 这份 pdb.xml 用 genddl 建出来的库里 schemaName 下的表结构，和 inspectDatabase 读出来的一样
+// （TestTablesFromSchemaMatchDatabase 核对）：-base 不连库时拿它当库里现有的。base 的 schema 不是 schemaName 时那里没有表。
+func tablesFromSchema(base *readxml.Schema, schemaName string) (map[string]*DBTable, error) {
+	if err := checkNames(base); err != nil {
+		return nil, err
+	}
+	result := make(map[string]*DBTable)
+	if base.Schema != schemaName {
+		return result, nil
+	}
+	for _, table := range base.Tables {
+		bean, err := readxml.FindBean(base, table.Bean)
+		if err != nil {
+			return nil, fmt.Errorf("%stable %s: %w", at(base, table.Line), table.Name, err)
+		}
+		dbTable := &DBTable{Name: table.Name, Columns: make(map[string]DBColumn), Indexes: make(map[string]DBIndex)}
+		for _, v := range bean.Variables {
+			columnType, _, err := sqlType(v.Type)
+			if err != nil {
+				return nil, fmt.Errorf("%stable %s column %s: %w", at(base, v.Line), table.Name, v.Name, err)
+			}
+			name := readxml.SnakeCase(v.Name)
+			dbTable.Columns[name] = DBColumn{
+				Name:       name,
+				DataType:   normalizeDBType(columnType),
+				IsIdentity: table.PrimaryKey != nil && table.PrimaryKey.AutoIncrement && v.Name == table.PrimaryKey.Variable,
+			}
+		}
+		if table.PrimaryKey != nil {
+			name, columns := primaryKeyName(table), []string{readxml.SnakeCase(table.PrimaryKey.Variable)}
+			dbTable.PrimaryKey = &DBPrimaryKey{Name: name, Columns: columns}
+			// 主键约束自带一个同名的唯一索引，inspectDatabase 读索引时也会读到它
+			dbTable.Indexes[name] = DBIndex{Name: name, Unique: true, Columns: columns}
+		}
+		for _, index := range table.Indexes {
+			columns, where, err := indexDefinition(base, table, index)
+			if err != nil {
+				return nil, err
+			}
+			name := indexName(table, index)
+			dbTable.Indexes[name] = DBIndex{Name: name, Unique: index.Unique, Columns: columns, Where: where}
+		}
+		result[table.Name] = dbTable
+	}
+	return result, nil
+}
+
+// generateFrom 按库里现有的表结构 dbTables 生成 DDL。输出包在 BEGIN / COMMIT 里：中途有一条失败，整个脚本都不生效。
+func generateFrom(schema *readxml.Schema, dbTables map[string]*DBTable) (string, error) {
+	if err := checkNames(schema); err != nil {
 		return "", err
 	}
 

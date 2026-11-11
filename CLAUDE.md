@@ -21,6 +21,8 @@ go run ./gen/bean -schema ./pdb.xml
 
 # 生成 DDL：连接 pdb.xml 里的 url 读库里的真实结构，把 SQL 打到 stdout（不写文件、不执行）
 go run ./gen/ddl -schema ./pdb.xml > ddl.sql
+# 不连库：-base 另一份 pdb.xml（当库里是它建出来的样子，打两个版本之间的增量），-base empty（完整建表语句）
+go run ./gen/ddl -schema new/pdb.xml -base old/pdb.xml > ddl.sql
 
 # 测试。dbpool 的集成测试连 pdb.xml 里那套 PG（见 README 的 docker 命令）：
 # 连不上默认 skip；PDBGEN_REQUIRE_DB=1 时直接失败，确认改动真的在库上跑过时用它
@@ -47,7 +49,7 @@ pdb.xml ──readxml──┬─> gen/ddl  连库内省 → CREATE/ALTER DDL（
 
 - [pdb.xml](pdb.xml) 同时是生成配置和表结构定义：`bean` 声明字段（Go 类型），`table` 把 bean 映射到表名、主键、索引。运行时参数（连接池、各类超时、`showSQL`、`appName`）也在这里。
 - [readxml/](readxml/) 只负责读 `pdb.xml` 和命名转换；生成器的中间模型（`field` / `tableGen` / `queryMethod`）在 `gen/bean` 里。[readxml/parse.go](readxml/parse.go) 自己解析 XML（不用 `encoding/xml` 的 Unmarshal），每个元素的属性表就是允许的全部属性：不认识的元素和属性、写不对的值都报错，带 `文件:行号`，一次报全（design.md 第 4 节）。加属性就是在对应元素的属性表里加一项，结构体（[readxml/xml.go](readxml/xml.go)）同步加字段。
-- [gen/ddl/main.go](gen/ddl/main.go) 只做增量：缺的表/列/索引才生成 DDL；已存在的列只做校验（类型不符、XML 要求 NOT NULL 但库里可空 → 直接报错），**不存在任何修改列类型或 DROP 的逻辑**，主键/索引定义对不上也是报错而不是重建。输出包在 `BEGIN; ... COMMIT;` 里。`checkNames` 先检查所有标识符不超过 63 字节、表/主键/索引在 schema 里不重名（超长的用 `<index name="...">` / `<primaryKey name="...">` 起短名字）。连库用 `QueryExecModeExec`，经过 pgBouncer 也能用。`TestGenerateAgainstDatabase` 在真实 PG 的临时 schema 里跑完整流程（建表、再跑无事可做、加列加索引、定义不符报错），测完删掉 schema。Go 类型映射：`int64→BIGINT`、`int32→INTEGER`、`int16/int8→SMALLINT`、`string→TEXT`、`bool→BOOLEAN`、`float32→REAL`、`float64→DOUBLE PRECISION`，非空列生成 `NOT NULL DEFAULT` 默认值（bool 默认 `false`，数值默认 `0`，文本默认 `''`）。
+- [gen/ddl/main.go](gen/ddl/main.go) 只做增量：缺的表/列/索引才生成 DDL；已存在的列只做校验（类型不符、XML 要求 NOT NULL 但库里可空 → 直接报错），**不存在任何修改列类型或 DROP 的逻辑**，主键/索引定义对不上也是报错而不是重建。输出包在 `BEGIN; ... COMMIT;` 里。`checkNames` 先检查所有标识符不超过 63 字节、表/主键/索引在 schema 里不重名（超长的用 `<index name="...">` / `<primaryKey name="...">` 起短名字）。连库用 `QueryExecModeExec`，经过 pgBouncer 也能用。`TestGenerateAgainstDatabase` 在真实 PG 的临时 schema 里跑完整流程（建表、再跑无事可做、加列加索引、定义不符报错），测完删掉 schema；每次建完还核对 `tablesFromSchema`（`-base` 用的、从 pdb.xml 推出来的表结构）和库里读出来的一样（主键自带的唯一索引也算一个索引）。`-base` 不连库：`generate` 是"读库 + `generateFrom`"，`-base` 换成"`tablesFromSchema(旧 xml)` + `generateFrom`"，生成逻辑同一份；`TestGenerateFromBase` 不要库。Go 类型映射：`int64→BIGINT`、`int32→INTEGER`、`int16/int8→SMALLINT`、`string→TEXT`、`bool→BOOLEAN`、`float32→REAL`、`float64→DOUBLE PRECISION`，非空列生成 `NOT NULL DEFAULT` 默认值（bool 默认 `false`，数值默认 `0`，文本默认 `''`）。
 - [gen/bean/main.go](gen/bean/main.go) + [gen/bean/template.go](gen/bean/template.go) 生成 `ptable/<表名>.pdb.go`。模板是 Go 源码里的一个字符串常量，生成后经 `gofmt` 格式化。框架不支持的 schema 在这里直接报错（规则见 [docs/design.md](docs/design.md) 第 4 节），不要为了兼容某种 schema 去放宽它；所有表的错误一次报出来，带 `pdb.xml:行号`。[gen/bean/output.go](gen/bean/output.go) 负责写文件：内容没变不写；删除输出目录里不再需要的生成文件（第一行是 `header` 的 `.go` 文件，包括以前的 `<表名>.go`），不碰手写文件；用 go/build 的规则检查文件名不带平台后缀（`buildsEverywhere`）；用 go/parser 解析生成结果，查出不同的表生成了同一个包级名字（`checkDeclarations`）。生成代码导入的 dbctx 路径从 readxml 的导入路径推出来（`dbctxImport`），模块改名不用改模板。
 
 生成代码对表结构的约定：
